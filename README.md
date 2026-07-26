@@ -22,6 +22,11 @@ connection — the session keeps running).
 
 ![rmux with three panes across a vertical and horizontal split, and two tabs in the tab bar](assets/overview.png)
 
+A timelapse of a session: splitting panes, moving focus, creating a
+tab, and switching between sessions with the managers:
+
+![animated timelapse of splitting panes, creating tabs, and switching sessions](assets/demo.svg)
+
 ## Running under systemd
 
 `rmux.service` is a **system** service: it starts at boot and runs
