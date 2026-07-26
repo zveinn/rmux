@@ -16,6 +16,13 @@ pub const C2S_RESIZE: u8 = 3;
 /// Client → server: list sessions; the server replies with `S2C_LIST`
 /// and closes the connection.
 pub const C2S_LIST: u8 = 4;
+/// Client → server, one-shot agent commands (see `agent.rs` for the
+/// payload encodings); the server replies with `S2C_AGENT_OK` or
+/// `S2C_AGENT_ERR` and closes.
+pub const C2S_AGENT_NEW: u8 = 5;
+pub const C2S_AGENT_KILL: u8 = 6;
+pub const C2S_AGENT_SEND: u8 = 7;
+pub const C2S_AGENT_READ: u8 = 8;
 
 /// Server → client: bytes to write to the client's terminal.
 pub const S2C_OUTPUT: u8 = 1;
@@ -24,6 +31,10 @@ pub const S2C_OUTPUT: u8 = 1;
 pub const S2C_BYE: u8 = 2;
 /// Server → client: the session listing, ready to print.
 pub const S2C_LIST: u8 = 3;
+/// Server → client: an agent command succeeded; payload is its output.
+pub const S2C_AGENT_OK: u8 = 4;
+/// Server → client: an agent command failed; payload is the error text.
+pub const S2C_AGENT_ERR: u8 = 5;
 
 /// Ceiling on a single frame; anything larger is a protocol error.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;

@@ -17,12 +17,13 @@ use crossterm::{
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::Result;
+use crate::agent;
 use crate::config::{self, Config};
 use crate::input::{Mode, Overlay, handle_input, session_entries};
 use crate::model::Session;
 use crate::protocol::{
-    C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_BYE, S2C_LIST, S2C_OUTPUT,
-    frame, socket_path,
+    C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK,
+    S2C_BYE, S2C_LIST, S2C_OUTPUT, frame, socket_path,
 };
 use crate::render::{ListItem, Renderer, content_size, draw_manager, draw_naming, draw_session};
 
@@ -343,7 +344,7 @@ pub fn run() -> Result<()> {
                 } = client.mode
                 {
                     let count = match overlay {
-                        Overlay::Sessions => sessions.len(),
+                        Overlay::Sessions { .. } => sessions.len(),
                         Overlay::Tabs => 1, // clamped properly on redraw input
                     };
                     *selected = (*selected).min(count.saturating_sub(1));
@@ -378,8 +379,8 @@ pub fn run() -> Result<()> {
                     draw_session(&mut renderer, &sessions[si], &mut buf, size, config.accent)?;
                 }
                 Mode::Manager { overlay, selected } => match overlay {
-                    Overlay::Sessions => {
-                        let entries = session_entries(&config.pins, &sessions);
+                    Overlay::Sessions { agents } => {
+                        let entries = agent::manager_entries(&config.pins, &sessions, *agents);
                         let items: Vec<ListItem> = entries
                             .iter()
                             .map(|e| ListItem {
@@ -388,7 +389,16 @@ pub fn run() -> Result<()> {
                                 dim: e.running.is_none(),
                             })
                             .collect();
-                        draw_manager(&mut buf, "sessions", &items, *selected, size, config.accent)?;
+                        let (title, toggle) = if *agents {
+                            ("agent sessions", "a normal")
+                        } else {
+                            ("sessions", "a agents")
+                        };
+                        let footer = format!(
+                            "enter switch · n new · r rename · x kill · {toggle} · esc close"
+                        );
+                        let selected = (*selected).min(items.len().saturating_sub(1));
+                        draw_manager(&mut buf, title, &items, selected, size, config.accent, &footer)?;
                     }
                     Overlay::Tabs => {
                         let session = &sessions[si];
@@ -403,7 +413,8 @@ pub fn run() -> Result<()> {
                             })
                             .collect();
                         let title = format!("{} · tabs", session.name);
-                        draw_manager(&mut buf, &title, &items, *selected, size, config.accent)?;
+                        let footer = "enter switch · n new · r rename · x kill · esc close";
+                        draw_manager(&mut buf, &title, &items, *selected, size, config.accent, footer)?;
                     }
                 },
                 Mode::Naming {
@@ -412,8 +423,9 @@ pub fn run() -> Result<()> {
                     rename,
                 } => {
                     let title = match (overlay, rename.is_some()) {
-                        (Overlay::Sessions, false) => "new session",
-                        (Overlay::Sessions, true) => "rename session",
+                        (Overlay::Sessions { agents: false }, false) => "new session",
+                        (Overlay::Sessions { agents: true }, false) => "new agent session",
+                        (Overlay::Sessions { .. }, true) => "rename session",
                         (Overlay::Tabs, false) => "new tab",
                         (Overlay::Tabs, true) => "rename tab",
                     };
@@ -518,6 +530,23 @@ fn handle_frame(
             // One-shot request: close once the reply drains.
             clients[ci].closing = true;
         }
+        kind if agent::is_agent_frame(kind) => {
+            let (result, sessions_changed) = agent::execute(kind, &payload, sessions, config);
+            match result {
+                Ok(text) => clients[ci].send(S2C_AGENT_OK, text.as_bytes()),
+                Err(e) => clients[ci].send(S2C_AGENT_ERR, e.as_bytes()),
+            }
+            // One-shot request: close once the reply drains.
+            clients[ci].closing = true;
+            if sessions_changed {
+                rehome_homeless_clients(clients, sessions)?;
+                for client in clients.iter_mut() {
+                    if client.attached.is_some() && !client.closing && !client.dead {
+                        client.needs_redraw = true;
+                    }
+                }
+            }
+        }
         C2S_RESIZE => {
             if payload.len() < 4 {
                 return Ok(());
@@ -594,11 +623,12 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
                         out,
                         SetAttribute(Attribute::Dim),
                         Print(format!(
-                            "  {} tab{} · {} pane{}",
+                            "  {} tab{} · {} pane{}{}",
                             session.tabs.len(),
                             if session.tabs.len() == 1 { "" } else { "s" },
                             panes,
                             if panes == 1 { "" } else { "s" },
+                            if session.agent { " · agent" } else { "" },
                         )),
                         SetAttribute(Attribute::Reset),
                     )?;

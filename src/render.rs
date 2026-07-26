@@ -146,10 +146,10 @@ fn draw_tab_bar(out: &mut impl Write, session: &Session, size: (u16, u16), accen
 }
 
 // Line-component bits for box-drawing junction resolution.
-const B_UP: u8 = 1;
-const B_DOWN: u8 = 2;
-const B_LEFT: u8 = 4;
-const B_RIGHT: u8 = 8;
+pub(crate) const B_UP: u8 = 1;
+pub(crate) const B_DOWN: u8 = 2;
+pub(crate) const B_LEFT: u8 = 4;
+pub(crate) const B_RIGHT: u8 = 8;
 
 /// Draw the divider lines of every split, resolving crossings and tees
 /// (`┬ ┴ ├ ┤ ┼`) where dividers meet instead of overdrawing. Divider
@@ -204,7 +204,7 @@ fn touches(f: Rect, x: u16, y: u16) -> bool {
     on_vertical || on_horizontal
 }
 
-fn collect_dividers(layout: &Layout, rect: Rect, cells: &mut HashMap<(u16, u16), (u8, bool)>) {
+pub(crate) fn collect_dividers(layout: &Layout, rect: Rect, cells: &mut HashMap<(u16, u16), (u8, bool)>) {
     let Layout::Split { dir, a, b } = layout else {
         return;
     };
@@ -240,7 +240,7 @@ fn collect_dividers(layout: &Layout, rect: Rect, cells: &mut HashMap<(u16, u16),
     collect_dividers(b, rb, cells);
 }
 
-fn box_char(bits: u8) -> char {
+pub(crate) fn box_char(bits: u8) -> char {
     let (u, d, l, r) = (
         bits & B_UP != 0,
         bits & B_DOWN != 0,
@@ -333,6 +333,7 @@ pub fn draw_manager(
     selected: usize,
     size: (u16, u16),
     accent: Color,
+    footer: &str,
 ) -> Result<()> {
     queue!(
         out,
@@ -341,8 +342,6 @@ pub fn draw_manager(
         SetAttribute(Attribute::Reset),
         Clear(ClearType::All),
     )?;
-
-    let footer = "enter switch · n new · r rename · x kill · esc close";
     // Window the list if the screen is short.
     let max_shown = (size.1.saturating_sub(6) as usize).max(1);
     let offset = (selected + 1).saturating_sub(max_shown);

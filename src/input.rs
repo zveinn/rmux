@@ -9,8 +9,9 @@ use crate::pty::Pty;
 /// Which manager overlay is on screen (or being named for).
 #[derive(Clone, Copy)]
 pub enum Overlay {
-    /// Sessions: named groups of tabs.
-    Sessions,
+    /// Sessions: named groups of tabs. `agents` selects which list is
+    /// shown — normal sessions or agent sessions (toggled with `a`).
+    Sessions { agents: bool },
     /// Tabs of the currently viewed session.
     Tabs,
 }
@@ -162,6 +163,8 @@ pub enum MgrAction {
     New,
     Rename,
     Kill,
+    /// Flip the session manager between normal and agent sessions.
+    ToggleAgents,
     Close,
 }
 
@@ -179,6 +182,8 @@ enum MgrOutcome {
     Rename(usize),
     /// Kill the selected entry (all its shells).
     Kill(usize),
+    /// Flip between the normal and agent session lists.
+    ToggleAgents,
 }
 
 /// Parse manager-mode key presses from raw stdin bytes. The chords bound
@@ -203,6 +208,7 @@ pub fn manager_actions(buf: &[u8], bindings: &[Binding]) -> Vec<MgrAction> {
             b'n' => actions.push(MgrAction::New),
             b'r' => actions.push(MgrAction::Rename),
             b'x' => actions.push(MgrAction::Kill),
+            b'a' => actions.push(MgrAction::ToggleAgents),
             b'j' => actions.push(MgrAction::Down),
             b'k' => actions.push(MgrAction::Up),
             b'q' => actions.push(MgrAction::Close),
@@ -238,6 +244,7 @@ fn manager_apply(actions: &[MgrAction], selected: &mut usize, count: usize) -> M
             MgrAction::New => return MgrOutcome::StartNaming,
             MgrAction::Rename => return MgrOutcome::Rename(*selected),
             MgrAction::Kill => return MgrOutcome::Kill(*selected),
+            MgrAction::ToggleAgents => return MgrOutcome::ToggleAgents,
             MgrAction::Close => return MgrOutcome::Close,
         }
     }
@@ -258,17 +265,28 @@ pub fn run_manager(
     config: &Config,
 ) -> Result<Option<Mode>> {
     let pins: &[Pin] = &config.pins;
+    let agents = matches!(overlay, Overlay::Sessions { agents: true });
     let count = match overlay {
-        Overlay::Sessions => session_entries(pins, sessions).len(),
+        Overlay::Sessions { .. } => crate::agent::manager_entries(pins, sessions, agents).len(),
         Overlay::Tabs => sessions[*active].tabs.len(),
     };
     Ok(match manager_apply(actions, selected, count.max(1)) {
         MgrOutcome::Stay => None,
         MgrOutcome::Close => Some(Mode::Running),
+        MgrOutcome::ToggleAgents => match overlay {
+            Overlay::Sessions { agents } => {
+                *selected = 0;
+                Some(Mode::Manager {
+                    overlay: Overlay::Sessions { agents: !agents },
+                    selected: 0,
+                })
+            }
+            Overlay::Tabs => None,
+        },
         MgrOutcome::Switch(i) => {
             match overlay {
-                Overlay::Sessions => {
-                    let entries = session_entries(pins, sessions);
+                Overlay::Sessions { .. } => {
+                    let entries = crate::agent::manager_entries(pins, sessions, agents);
                     if let Some(entry) = entries.get(i) {
                         *active = match entry.running {
                             Some(si) => si,
@@ -288,8 +306,8 @@ pub fn run_manager(
             rename: None,
         }),
         MgrOutcome::Rename(i) => match overlay {
-            Overlay::Sessions => {
-                let entries = session_entries(pins, sessions);
+            Overlay::Sessions { .. } => {
+                let entries = crate::agent::manager_entries(pins, sessions, agents);
                 match entries.get(i).and_then(|e| e.running) {
                     Some(si) => Some(Mode::Naming {
                         overlay,
@@ -307,8 +325,8 @@ pub fn run_manager(
             }),
         },
         MgrOutcome::Kill(i) => match overlay {
-            Overlay::Sessions => {
-                let entries = session_entries(pins, sessions);
+            Overlay::Sessions { .. } => {
+                let entries = crate::agent::manager_entries(pins, sessions, agents);
                 if let Some(si) = entries.get(i).and_then(|e| e.running) {
                     let viewed = sessions.get(*active).map(|s| s.id);
                     // Dropping the session closes its ptys; the shells
@@ -320,7 +338,7 @@ pub fn run_manager(
                         *active = sessions.iter().position(|s| s.id == vid).unwrap_or(0);
                     }
                 }
-                let count = session_entries(pins, sessions).len();
+                let count = crate::agent::manager_entries(pins, sessions, agents).len();
                 *selected = (*selected).min(count.saturating_sub(1));
                 None // stay in the manager
             }
@@ -470,7 +488,7 @@ pub fn handle_input(
                         // Bytes typed right after the chord are already
                         // manager input.
                         let mut selected = match overlay {
-                            Overlay::Sessions => *active,
+                            Overlay::Sessions { .. } => *active,
                             Overlay::Tabs => sessions[*active].active_tab,
                         };
                         next_mode = Some(
@@ -510,7 +528,7 @@ pub fn handle_input(
                     NamingOutcome::Pending => {}
                     NamingOutcome::Cancel => {
                         let selected = match overlay {
-                            Overlay::Sessions => *active,
+                            Overlay::Sessions { .. } => *active,
                             Overlay::Tabs => sessions[*active].active_tab,
                         };
                         next_mode = Some(Mode::Manager {
@@ -548,7 +566,7 @@ pub fn handle_input(
                             }
                             None => {
                                 match overlay {
-                                    Overlay::Sessions => {
+                                    Overlay::Sessions { agents } => {
                                         let name = if typed.is_empty() {
                                             format!("session {}", sessions.len() + 1)
                                         } else {
@@ -556,6 +574,9 @@ pub fn handle_input(
                                         };
                                         *active =
                                             create_session(sessions, config, size, name)?;
+                                        // Created from the agent view =
+                                        // an agent session.
+                                        sessions[*active].agent = *agents;
                                     }
                                     Overlay::Tabs => {
                                         let session = &mut sessions[*active];

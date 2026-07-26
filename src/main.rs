@@ -15,6 +15,7 @@
 //! focused pane, Ctrl+Q/W/E/R move pane focus, Ctrl+T cycles it, and
 //! Ctrl+G detaches.
 
+mod agent;
 mod client;
 mod config;
 mod input;
@@ -38,9 +39,11 @@ fn main() -> Result<()> {
             client::run(name)
         }
         Some("list" | "ls") => client::list(),
+        Some("agent") => agent::run(&args[1..]),
         _ => {
             eprintln!(
-                "usage: rmux server | rmux a[ttach] <session-name> | rmux list"
+                "usage: rmux server | rmux a[ttach] <session-name> | rmux list\n\
+                        rmux agent new|kill|send|read ...  (rmux agent for details)"
             );
             std::process::exit(2);
         }

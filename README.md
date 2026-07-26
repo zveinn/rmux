@@ -130,6 +130,8 @@ Both managers use the same controls, with `*` marking the active entry:
   Killing the last tab kills the session; a client whose session is
   killed falls back to the first surviving session, or is disconnected
   when none remain
+- `a` — session manager only: flip between your sessions and the agent
+  sessions (see [Agent mode](#agent-mode))
 - `Esc` / `q` / `Ctrl+o` / `Ctrl+n` — close the manager
 
 A pane disappears when its shell exits; a tab disappears with its last
@@ -138,6 +140,28 @@ sessions remain. Background panes keep running and their output is
 processed while hidden. All control keys can be rebound via the
 `keybindings` config section (note: Ctrl+n is normally readline's
 next-history binding — use the Down arrow inside shells).
+
+## Agent mode
+
+`rmux agent` is a non-interactive control surface for LLM agents and
+scripts — one-shot commands over the socket, no pty or attach needed:
+
+```sh
+rmux agent new  llm-build            # create an agent session
+rmux agent new  llm-build server     # add a tab to it
+rmux agent send llm-build [-t tab] 'cargo test'   # type text + Enter
+rmux agent read llm-build [-t tab]   # print the pane grid as plain text
+rmux agent kill llm-build [tab]      # kill a tab or the whole session
+```
+
+Sessions created this way are **agent sessions**: normal in every way
+(real shells, tabs, splits, attachable with `rmux a <name>`), but the
+agent commands refuse to touch anything else — an agent can never kill
+or type into your sessions. Agent sessions are kept out of your way in
+a separate session-manager list: press **`a`** in the Ctrl+O manager to
+flip between your sessions and the agent ones (they're also tagged
+`agent` in `rmux list`). A skill teaching agents this workflow ships in
+`.claude/skills/rmux/`.
 
 ## Shortcuts
 

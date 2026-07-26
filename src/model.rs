@@ -245,6 +245,13 @@ pub struct Session {
     pub name: String,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Created via `rmux agent new`: listed separately in the session
+    /// manager and addressable by the agent commands, but otherwise a
+    /// normal session.
+    pub agent: bool,
+    /// The content size the session was last laid out for (its client's
+    /// size, or the agent default when never attached).
+    pub last_size: (u16, u16),
 }
 
 impl Pane {
@@ -509,10 +516,13 @@ impl Session {
             name,
             tabs: vec![Tab::new(size, "tab 1".to_string(), config)?],
             active_tab: 0,
+            agent: false,
+            last_size: size,
         })
     }
 
     pub fn resize(&mut self, size: (u16, u16)) -> Result<()> {
+        self.last_size = size;
         for tab in &mut self.tabs {
             tab.apply_layout(size)?;
         }

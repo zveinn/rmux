@@ -69,7 +69,7 @@ pub struct Config {
 
 /// The server's controls: config name, default key, action.
 const ACTIONS: [(&str, &str, InputAction); 11] = [
-    ("session-manager", "ctrl+o", InputAction::Manager(Overlay::Sessions)),
+    ("session-manager", "ctrl+o", InputAction::Manager(Overlay::Sessions { agents: false })),
     ("tab-manager", "ctrl+n", InputAction::Manager(Overlay::Tabs)),
     ("split-horizontal", "ctrl+k", InputAction::SplitH),
     ("split-vertical", "ctrl+l", InputAction::SplitV),
