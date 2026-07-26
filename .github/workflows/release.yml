@@ -1,0 +1,42 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # libghostty-vt-sys builds libghostty-vt from Ghostty source at
+      # build time and needs zig on PATH; keep in sync with the version
+      # used for local builds.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          strip target/release/rmux
+          mkdir -p dist/rmux-${GITHUB_REF_NAME}-x86_64-linux
+          cp target/release/rmux rmux.service default-config.yaml README.md \
+            dist/rmux-${GITHUB_REF_NAME}-x86_64-linux/
+          tar -C dist -czf dist/rmux-${GITHUB_REF_NAME}-x86_64-linux.tar.gz \
+            rmux-${GITHUB_REF_NAME}-x86_64-linux
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
