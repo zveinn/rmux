@@ -6,7 +6,7 @@ Client/server like tmux: a long-lived server owns **sessions → tabs →
 panes**, thin clients attach over a Unix socket — sessions survive SSH
 disconnects, reattach and everything is as you left it.
 
-## Built for agents
+## Supports agents
 
 LLM agents get a first-class, non-interactive control surface — one-shot
 commands over the socket, no pty, no keystroke faking:
