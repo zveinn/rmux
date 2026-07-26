@@ -2,10 +2,15 @@ accent: "#7aa2f7"
 
 shell: /usr/bin/bash
 
+# where new shells start; unset or empty = your home directory
+start_dir:
+
 terminal_envs:
   TERM: xterm-256color
 
-shortcuts:
+# chords that type a program + Enter into the focused pane, e.g.
+#   alt+g: lazygit
+commands:
 
 keybindings:
   session-manager: ctrl+o

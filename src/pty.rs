@@ -46,6 +46,25 @@ impl Pty {
                         },
                     },
                 };
+                // Start in the configured start_dir, falling back to the
+                // home directory (never the server's own cwd).
+                let home = || -> Option<PathBuf> {
+                    match std::env::var_os("HOME") {
+                        Some(h) if !h.is_empty() => Some(PathBuf::from(h)),
+                        _ => unistd::User::from_uid(unistd::getuid())
+                            .ok()
+                            .flatten()
+                            .map(|user| user.dir),
+                    }
+                };
+                let start_dir = config
+                    .start_dir
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .or_else(home);
+                if let Some(dir) = start_dir {
+                    let _ = std::env::set_current_dir(dir);
+                }
                 let arg0 = shell.file_name().unwrap_or(shell.as_os_str());
                 let mut cmd = Command::new(&shell);
                 for (key, value) in &config.envs {

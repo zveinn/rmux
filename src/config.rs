@@ -1,8 +1,9 @@
 //! Config, loaded from `$HOME/.config/rmux/config.yaml`:
 //!
 //! ```yaml
-//! shortcuts:
-//!   ctrl+h: htop
+//! start_dir: /home/you/code
+//! commands:
+//!   alt+h: htop
 //!   alt+g: lazygit
 //! keybindings:
 //!   session-manager: ctrl+o
@@ -12,7 +13,8 @@
 //!   5: { name: scratch, key: F5 }
 //! ```
 //!
-//! `shortcuts` type a program into the shell; `keybindings` rebind the
+//! `start_dir` is where new shells start (unset = your home directory);
+//! `commands` type a program into the shell; `keybindings` rebind the
 //! server's own controls (any action not listed keeps its default);
 //! `sessions` pin sessions to slots in the session list — the slot
 //! number orders them (gaps collapse in the display) and the key opens
@@ -50,7 +52,7 @@ pub struct Pin {
 }
 
 pub struct Config {
-    /// All key bindings (controls, shortcuts, session keys), longest
+    /// All key bindings (controls, command bindings, session keys), longest
     /// sequence first.
     pub bindings: Vec<Binding>,
     /// Pinned sessions in slot order.
@@ -65,6 +67,9 @@ pub struct Config {
     /// Shell to spawn (`shell: /usr/bin/fish`). When unset, falls back
     /// to $SHELL, then the passwd entry, then /bin/sh.
     pub shell: Option<String>,
+    /// Directory new shells start in (`start_dir: /home/you/code`).
+    /// When unset, the user's home directory.
+    pub start_dir: Option<String>,
 }
 
 /// The server's controls: config name, default key, action.
@@ -92,7 +97,7 @@ struct RawPin {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
-    shortcuts: HashMap<String, String>,
+    commands: HashMap<String, String>,
     #[serde(default)]
     keybindings: HashMap<String, String>,
     #[serde(default)]
@@ -103,6 +108,8 @@ struct RawConfig {
     terminal_envs: Option<HashMap<String, String>>,
     #[serde(default)]
     shell: Option<String>,
+    #[serde(default)]
+    start_dir: Option<String>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -121,12 +128,13 @@ pub fn load() -> Result<Config, String> {
             raw
         }
         None => RawConfig {
-            shortcuts: HashMap::new(),
+            commands: HashMap::new(),
             keybindings: HashMap::new(),
             sessions: HashMap::new(),
             accent: None,
             terminal_envs: None,
             shell: None,
+            start_dir: None,
         },
     };
 
@@ -164,9 +172,10 @@ pub fn load() -> Result<Config, String> {
         }
     }
 
-    // Program shortcuts.
-    for (key, run) in raw.shortcuts {
-        let seqs = parse_key_multi(&key).map_err(|e| format!("invalid shortcut \"{key}\": {e}"))?;
+    // Command bindings: the chord types a program into the shell.
+    for (key, run) in raw.commands {
+        let seqs =
+            parse_key_multi(&key).map_err(|e| format!("invalid command binding \"{key}\": {e}"))?;
         for seq in seqs {
             bindings.push(Binding {
                 seq,
@@ -232,12 +241,35 @@ pub fn load() -> Result<Config, String> {
         None => None,
     };
 
+    let start_dir = match raw.start_dir {
+        Some(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None // same as unset: the home directory
+            } else {
+                // Allow `~/...` for convenience.
+                let expanded = match (s.strip_prefix("~"), std::env::var_os("HOME")) {
+                    (Some(rest), Some(home)) => {
+                        format!("{}{rest}", home.to_string_lossy())
+                    }
+                    _ => s.to_string(),
+                };
+                if !std::path::Path::new(&expanded).is_dir() {
+                    return Err(format!("start_dir \"{s}\" is not a directory"));
+                }
+                Some(expanded)
+            }
+        }
+        None => None,
+    };
+
     Ok(Config {
         bindings,
         pins,
         accent,
         envs,
         shell,
+        start_dir,
     })
 }
 
@@ -362,9 +394,9 @@ fn parse_key(spec: &str) -> Result<Vec<u8>, String> {
         return Err(format!("key must be a single character, got \"{}\"", key[0]));
     };
 
-    // A shortcut without modifiers would hijack ordinary typing.
+    // A binding without modifiers would hijack ordinary typing.
     if !ctrl && !alt {
-        return Err("shortcut needs at least one modifier (ctrl/alt)".into());
+        return Err("key needs at least one modifier (ctrl/alt)".into());
     }
 
     let mut seq = Vec::with_capacity(5);
@@ -373,7 +405,7 @@ fn parse_key(spec: &str) -> Result<Vec<u8>, String> {
     }
     if ctrl {
         if !ch.is_ascii_alphabetic() {
-            return Err("ctrl+ shortcuts only support letters a-z".into());
+            return Err("ctrl+ bindings only support letters a-z".into());
         }
         seq.push(ch.to_ascii_lowercase() as u8 & 0x1f);
     } else {

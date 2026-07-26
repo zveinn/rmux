@@ -64,19 +64,25 @@ overrides); server logs land in `journalctl -u rmux`.
 
 ## Config
 
-`~/.config/rmux/config.yaml` — created with these defaults on first
-run, and **hot-reloaded** within about a second of saving (a broken
-config is rejected and the old one stays active):
+`~/.config/rmux/config.yaml` — created from the built-in defaults on
+first run, and **hot-reloaded** within about a second of saving (a
+broken config is rejected and the old one stays active). Shown here
+with sample `start_dir` and `commands` values:
 
 ```yaml
 accent: "#7aa2f7"
 
 shell: /usr/bin/bash
 
+# where new shells start; unset or empty = your home directory
+start_dir: ~/code
+
 terminal_envs:
   TERM: xterm-256color
 
-shortcuts:
+# chords that type a program + Enter into the focused pane
+commands:
+  alt+g: lazygit
 
 keybindings:
   session-manager: ctrl+o
@@ -111,8 +117,9 @@ swallowed by rmux and never reach the inner shell.
 | Agent list | `a` inside the session manager | Agent sessions only, most-recently-active first, with ages |
 | Tab manager | `ctrl+n` | Same controls as the session manager |
 | Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |
-| Shortcuts | `shortcuts:` in the config | The chord types `<program><Enter>` into the focused pane |
-| Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`terminal_envs` to new shells |
+| Commands | `commands:` in the config | The chord types `<program><Enter>` into the focused pane |
+| Start directory | `start_dir:` in the config | Where new shells start; unset = your home directory |
+| Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`start_dir`/`terminal_envs` to new shells |
 | Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
 | Agent mode | `rmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
 | Listing | `rmux list` | Colored on a tty, plain when piped (agents parse this) |

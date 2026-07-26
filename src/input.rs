@@ -1,4 +1,4 @@
-//! Input handling: scanning stdin bytes for bound chords and shortcuts,
+//! Input handling: scanning stdin bytes for bound chords and command bindings,
 //! and the manager-overlay / name-prompt key state machines.
 
 use crate::Result;
@@ -123,7 +123,7 @@ pub fn create_session(
 /// `i` is the index just past it; bytes before it have been forwarded,
 /// bytes from `i` on have not.
 ///
-/// When the byte sequence of a `Run` shortcut appears, we swallow it and
+/// When the byte sequence of a `Run` command binding appears, we swallow it and
 /// instead type the configured program name plus Enter into the shell.
 /// Bindings are matched longest-first (see `config::load`), and a chord
 /// split across two reads (e.g. a lone ESC press followed later by a
