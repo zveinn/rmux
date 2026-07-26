@@ -30,17 +30,28 @@ are normal sessions underneath. A ready-made Claude Code skill ships in
 
 ## Install
 
-Requires Rust 1.90+, plus [Zig](https://ziglang.org) and `git` on PATH
-(`libghostty-vt` builds from Ghostty source at compile time).
+Grab the latest Linux build from the
+[releases page](https://github.com/zveinn/rmux/releases) and put `rmux`
+on your PATH:
 
 ```sh
-cargo install --path .                        # the rmux binary
-# server as a systemd system service — survives SSH logouts, no linger
-# tricks needed. Edit User= and ExecStart= in rmux.service first:
+tar xzf rmux-v*-x86_64-linux.tar.gz && cd rmux-v*-x86_64-linux
+sudo install -m755 rmux /usr/local/bin/
+```
+
+Then run the server as a systemd system service — it starts at boot and
+survives SSH logouts, no linger tricks needed. The unit file ships in
+the tarball (and in this repo); set `User=` to your username first:
+
+```sh
 sudo cp rmux.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now rmux
 ```
+
+To build from source instead: `cargo install --path .` — needs Rust
+1.90+, plus [Zig](https://ziglang.org) and `git` on PATH
+(`libghostty-vt` compiles from Ghostty source).
 
 ```sh
 rmux a work    # attach to session "work", creating it if new

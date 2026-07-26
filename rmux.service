@@ -3,9 +3,8 @@
 # Runs at boot as a system-wide service, independent of login sessions —
 # sessions survive SSH logouts with no `loginctl enable-linger` needed.
 #
-# Edit User= and ExecStart= for your username and binary path (%h is not
-# usable here: in system units it expands to root's home), then:
-#   cargo build --release
+# Edit User= for your username (and ExecStart= if rmux lives somewhere
+# other than /usr/local/bin), then:
 #   sudo cp rmux.service /etc/systemd/system/
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now rmux
@@ -19,8 +18,8 @@ After=local-fs.target
 [Service]
 # The server (and every shell it spawns) runs as this user, never root.
 User=sveinn
-ExecStart=/home/sveinn/code/rmux/target/release/rmux server
+ExecStart=/usr/local/bin/rmux server
 Restart=on-failure
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
