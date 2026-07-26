@@ -1,0 +1,26 @@
+# System service for the rmux terminal multiplexer server.
+#
+# Runs at boot as a system-wide service, independent of login sessions —
+# sessions survive SSH logouts with no `loginctl enable-linger` needed.
+#
+# Edit User= and ExecStart= for your username and binary path (%h is not
+# usable here: in system units it expands to root's home), then:
+#   cargo build --release
+#   sudo cp rmux.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rmux
+#
+# Logs: journalctl -u rmux
+
+[Unit]
+Description=rmux terminal multiplexer server (libghostty-vt)
+After=local-fs.target
+
+[Service]
+# The server (and every shell it spawns) runs as this user, never root.
+User=sveinn
+ExecStart=/home/sveinn/code/rmux/target/release/rmux server
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

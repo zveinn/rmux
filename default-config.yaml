@@ -1,0 +1,24 @@
+accent: "#7aa2f7"
+
+shell: /usr/bin/bash
+
+terminal_envs:
+  TERM: xterm-256color
+
+shortcuts:
+
+keybindings:
+  session-manager: ctrl+o
+  tab-manager: ctrl+n
+  split-horizontal: ctrl+w
+  split-vertical: ctrl+q
+  focus-next: ctrl+t
+  focus-left: ctrl+h
+  focus-right: ctrl+l
+  focus-up: ctrl+k
+  focus-down: ctrl+j
+  detach: ctrl+g
+  fullscreen: ctrl+f
+
+sessions:
+  1: { name: meow, key: F7 }
