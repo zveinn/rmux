@@ -23,6 +23,7 @@ pub const C2S_AGENT_NEW: u8 = 5;
 pub const C2S_AGENT_KILL: u8 = 6;
 pub const C2S_AGENT_SEND: u8 = 7;
 pub const C2S_AGENT_READ: u8 = 8;
+pub const C2S_AGENT_RENAME: u8 = 9;
 
 /// Server → client: bytes to write to the client's terminal.
 pub const S2C_OUTPUT: u8 = 1;

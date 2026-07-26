@@ -147,11 +147,12 @@ next-history binding — use the Down arrow inside shells).
 scripts — one-shot commands over the socket, no pty or attach needed:
 
 ```sh
-rmux agent new  llm-build            # create an agent session
-rmux agent new  llm-build server     # add a tab to it
-rmux agent send llm-build [-t tab] 'cargo test'   # type text + Enter
-rmux agent read llm-build [-t tab]   # print the pane grid as plain text
-rmux agent kill llm-build [tab]      # kill a tab or the whole session
+rmux agent new  build                # create an agent session
+rmux agent new  build server         # add a tab to it
+rmux agent send build [-t tab] 'cargo test'   # type text + Enter
+rmux agent read build [-t tab]       # print the pane grid as plain text
+rmux agent rename build old-build    # rename an agent session
+rmux agent kill build [tab]          # kill a tab or the whole session
 ```
 
 Sessions created this way are **agent sessions**: normal in every way
@@ -160,7 +161,9 @@ agent commands refuse to touch anything else — an agent can never kill
 or type into your sessions. Agent sessions are kept out of your way in
 a separate session-manager list: press **`a`** in the Ctrl+O manager to
 flip between your sessions and the agent ones (they're also tagged
-`agent` in `rmux list`). A skill teaching agents this workflow ships in
+`agent` in `rmux list`). Agent sessions are ordered by activity —
+`new`/`send`/`read` bump a timestamp, and the most recently active
+session lists first. A skill teaching agents this workflow ships in
 `.claude/skills/rmux/`.
 
 ## Shortcuts

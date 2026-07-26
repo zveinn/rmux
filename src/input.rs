@@ -81,13 +81,15 @@ pub fn session_entries(pins: &[Pin], sessions: &[Session]) -> Vec<SessionEntry> 
         })
         .collect();
     for (si, session) in sessions.iter().enumerate() {
-        if !pins.iter().any(|p| p.name == session.name) {
+        if !session.agent && !pins.iter().any(|p| p.name == session.name) {
             entries.push(SessionEntry {
                 name: session.name.clone(),
                 running: Some(si),
             });
         }
     }
+    // Agent sessions last, most recently active first.
+    entries.extend(crate::agent::manager_entries(&[], sessions, true));
     entries
 }
 

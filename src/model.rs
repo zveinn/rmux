@@ -249,6 +249,9 @@ pub struct Session {
     /// manager and addressable by the agent commands, but otherwise a
     /// normal session.
     pub agent: bool,
+    /// Last agent activity (`agent new/send/read`); agent sessions are
+    /// listed most-recently-active first.
+    pub last_activity: std::time::Instant,
     /// The content size the session was last laid out for (its client's
     /// size, or the agent default when never attached).
     pub last_size: (u16, u16),
@@ -517,6 +520,7 @@ impl Session {
             tabs: vec![Tab::new(size, "tab 1".to_string(), config)?],
             active_tab: 0,
             agent: false,
+            last_activity: std::time::Instant::now(),
             last_size: size,
         })
     }

@@ -24,15 +24,16 @@ rmux list
 ```
 
 ```
-○ meow        not running                 <- pinned in config, not started
-● work        2 tabs · 3 panes  attached  <- the user's session, hands off
-○ llm-build   1 tab · 1 pane · agent      <- an agent session, yours
+○ meow   not running                 <- pinned in config, not started
+● work   2 tabs · 3 panes  attached  <- the user's session, hands off
+○ build  1 tab · 1 pane · agent      <- an agent session, yours (most
+                                        recently active agent lists first)
 ```
 
 If it errors with "cannot connect to server": `sudo systemctl start rmux`
 (or background `rmux server`).
 
-## The four commands
+## The commands
 
 ```sh
 rmux agent new  <session>            # create an agent session (one shell)
@@ -41,19 +42,24 @@ rmux agent kill <session>            # kill the whole session
 rmux agent kill <session> <tab>      # kill one tab (last tab = session dies)
 rmux agent send <session> [-t tab] <text...>   # type text + Enter into a pane
 rmux agent read <session> [-t tab]             # print the pane grid as text
+rmux agent rename <session> <new-name>         # rename an agent session
 ```
 
 `send`/`read` target the focused pane of the session's active tab;
 `-t <tab>` targets a named tab instead. All commands print a
 confirmation or a clear error and exit nonzero on failure.
 
+`new`/`send`/`read` bump the session's activity timestamp, and agent
+sessions are always listed most-recently-active first — so the top
+agent session in `rmux list` is the one most recently worked in.
+
 ## Run a command and read its output
 
 ```sh
-rmux agent new llm-build
-rmux agent send llm-build 'cargo test 2>&1 | tail -20'
+rmux agent new build
+rmux agent send build 'cargo test 2>&1 | tail -20'
 sleep 5                       # the shell runs it; wait for it to finish
-rmux agent read llm-build
+rmux agent read build
 ```
 
 `read` returns the rendered screen — shell prompt, the command you
@@ -71,16 +77,18 @@ behave like normal ones).
 ## Organize work with tabs
 
 ```sh
-rmux agent new llm-build server     # second tab "server" in llm-build
-rmux agent send llm-build -t server './run-dev-server.sh'
-rmux agent read llm-build -t server
-rmux agent kill llm-build server    # done with that tab
+rmux agent new build server     # second tab "server" in build
+rmux agent send build -t server './run-dev-server.sh'
+rmux agent read build -t server
+rmux agent kill build server    # done with that tab
 ```
 
 ## Etiquette
 
-- Name sessions after the work (`llm-build`, `llm-repro-1234`) so the
-  user knows what they'll find in them.
+- Name sessions after the work — **short and descriptive** (`build`,
+  `tests`, `repro-1234`) so the user knows what they'll find in them.
+  Rename when the purpose shifts (`rmux agent rename scratch bisect`);
+  names must be unique and can't shadow a config-pinned session.
 - Kill your sessions when the work is done — unless the point was to
   leave something running for the user (say so in your summary, and
   tell them: attach with `rmux a <session>`, list with `a` in the

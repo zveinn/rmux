@@ -10,10 +10,14 @@
 //!
 //! Wire format: each command is one frame; payload fields are utf-8
 //! separated by NUL bytes.
-//!   NEW   name [\0 tab]         create session (or add a tab to one)
-//!   KILL  name [\0 tab]         kill session (or one tab of it)
-//!   SEND  name \0 tab \0 text   type text + Enter (empty tab = active)
-//!   READ  name \0 tab           plain-text screen (empty tab = active)
+//!   NEW    name [\0 tab]         create session (or add a tab to one)
+//!   KILL   name [\0 tab]         kill session (or one tab of it)
+//!   SEND   name \0 tab \0 text   type text + Enter (empty tab = active)
+//!   READ   name \0 tab           plain-text screen (empty tab = active)
+//!   RENAME name \0 new-name      rename an agent session
+//!
+//! `new`/`send`/`read` bump the session's activity timestamp; agent
+//! sessions are listed most-recently-active first.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -29,8 +33,8 @@ use crate::config::{Config, Pin};
 use crate::input::{SessionEntry, create_session};
 use crate::model::{Rect, Session, Tab};
 use crate::protocol::{
-    C2S_AGENT_KILL, C2S_AGENT_NEW, C2S_AGENT_READ, C2S_AGENT_SEND, FrameReader, S2C_AGENT_ERR,
-    S2C_AGENT_OK, frame, socket_path,
+    C2S_AGENT_KILL, C2S_AGENT_NEW, C2S_AGENT_READ, C2S_AGENT_RENAME, C2S_AGENT_SEND, FrameReader,
+    S2C_AGENT_ERR, S2C_AGENT_OK, frame, socket_path,
 };
 
 /// Content size for sessions created without a client to size them
@@ -40,7 +44,8 @@ const DEFAULT_SIZE: (u16, u16) = (120, 31);
 const USAGE: &str = "usage: rmux agent new <session> [tab]\n\
        rmux agent kill <session> [tab]\n\
        rmux agent send <session> [-t tab] <text...>\n\
-       rmux agent read <session> [-t tab]";
+       rmux agent read <session> [-t tab]\n\
+       rmux agent rename <session> <new-name>";
 
 // ---------------------------------------------------------------------
 // Client side: parse argv, send one frame, print the reply.
@@ -142,6 +147,12 @@ fn parse_args(args: &[String]) -> Result<(u8, Vec<u8>)> {
             payload.extend_from_slice(tab.as_bytes());
             Ok((C2S_AGENT_READ, payload))
         }
+        Some("rename") => {
+            let mut payload = name(1)?.as_bytes().to_vec();
+            payload.push(0);
+            payload.extend_from_slice(name(2)?.as_bytes());
+            Ok((C2S_AGENT_RENAME, payload))
+        }
         _ => Err(USAGE.into()),
     }
 }
@@ -154,7 +165,7 @@ fn parse_args(args: &[String]) -> Result<(u8, Vec<u8>)> {
 pub fn is_agent_frame(kind: u8) -> bool {
     matches!(
         kind,
-        C2S_AGENT_NEW | C2S_AGENT_KILL | C2S_AGENT_SEND | C2S_AGENT_READ
+        C2S_AGENT_NEW | C2S_AGENT_KILL | C2S_AGENT_SEND | C2S_AGENT_READ | C2S_AGENT_RENAME
     )
 }
 
@@ -197,6 +208,13 @@ pub fn execute(
         C2S_AGENT_READ => {
             let tab = fields.get(1).map(String::as_str).unwrap_or("");
             (read(sessions, &name, tab), false)
+        }
+        C2S_AGENT_RENAME => {
+            let to = fields.get(1).map(String::as_str).unwrap_or("");
+            let result = rename(sessions, config, &name, to);
+            // A rename shows up in tab bars and manager lists.
+            let changed = result.is_ok();
+            (result, changed)
         }
         _ => (Err("unknown agent command".into()), false),
     }
@@ -253,7 +271,28 @@ fn new_tab(
         .tabs
         .push(Tab::new(size, tab.to_string(), config).map_err(|e| e.to_string())?);
     session.active_tab = session.tabs.len() - 1;
+    session.last_activity = std::time::Instant::now();
     Ok(format!("created tab \"{tab}\" in \"{name}\""))
+}
+
+fn rename(
+    sessions: &mut [Session],
+    config: &Config,
+    name: &str,
+    to: &str,
+) -> std::result::Result<String, String> {
+    if to.is_empty() {
+        return Err("empty new name".into());
+    }
+    if sessions.iter().any(|s| s.name == to) {
+        return Err(format!("session \"{to}\" already exists"));
+    }
+    if config.pins.iter().any(|p| p.name == to) {
+        return Err(format!("\"{to}\" is pinned in the config; pick another name"));
+    }
+    let session = agent_session(sessions, name)?;
+    session.name = to.to_string();
+    Ok(format!("renamed agent session \"{name}\" to \"{to}\""))
 }
 
 fn kill(
@@ -306,6 +345,7 @@ fn send(
 ) -> std::result::Result<String, String> {
     let session = agent_session(sessions, name)?;
     let ti = tab_index(session, tab)?;
+    session.last_activity = std::time::Instant::now();
     let tab = &session.tabs[ti];
     let Some(pane) = tab.layout.pane(tab.focused) else {
         return Err("tab has no focused pane".into());
@@ -322,6 +362,7 @@ fn read(
 ) -> std::result::Result<String, String> {
     let session = agent_session(sessions, name)?;
     let ti = tab_index(session, tab)?;
+    session.last_activity = std::time::Instant::now();
     render_text(session, ti).map_err(|e| e.to_string())
 }
 
@@ -430,13 +471,17 @@ fn render_text(session: &Session, ti: usize) -> Result<String> {
 
 /// The session-manager entries for one view: the normal view is pins +
 /// unpinned non-agent sessions (as before); the agent view is agent
-/// sessions only.
+/// sessions only, most recently active first.
 pub fn manager_entries(pins: &[Pin], sessions: &[Session], agents: bool) -> Vec<SessionEntry> {
     if agents {
-        return sessions
+        let mut agents: Vec<(usize, &Session)> = sessions
             .iter()
             .enumerate()
             .filter(|(_, s)| s.agent)
+            .collect();
+        agents.sort_by_key(|(_, s)| std::cmp::Reverse(s.last_activity));
+        return agents
+            .into_iter()
             .map(|(si, s)| SessionEntry {
                 name: s.name.clone(),
                 running: Some(si),
