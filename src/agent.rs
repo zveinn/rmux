@@ -469,6 +469,17 @@ fn render_text(session: &Session, ti: usize) -> Result<String> {
 // Session-manager list filtering (the `a` toggle).
 // ---------------------------------------------------------------------
 
+/// Compact "time since last agent activity" for list displays.
+pub fn age(last_activity: std::time::Instant) -> String {
+    let s = last_activity.elapsed().as_secs();
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        3600..=86399 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86400),
+    }
+}
+
 /// The session-manager entries for one view: the normal view is pins +
 /// unpinned non-agent sessions (as before); the agent view is agent
 /// sessions only, most recently active first.

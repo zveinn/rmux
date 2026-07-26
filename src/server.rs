@@ -381,10 +381,24 @@ pub fn run() -> Result<()> {
                 Mode::Manager { overlay, selected } => match overlay {
                     Overlay::Sessions { agents } => {
                         let entries = agent::manager_entries(&config.pins, &sessions, *agents);
+                        // Agent view: append each session's last-activity
+                        // age as an aligned column.
+                        let name_width = entries
+                            .iter()
+                            .map(|e| e.name.chars().count())
+                            .max()
+                            .unwrap_or(0);
                         let items: Vec<ListItem> = entries
                             .iter()
                             .map(|e| ListItem {
-                                label: e.name.clone(),
+                                label: match (*agents, e.running) {
+                                    (true, Some(esi)) => format!(
+                                        "{:<name_width$}  · {}",
+                                        e.name,
+                                        agent::age(sessions[esi].last_activity),
+                                    ),
+                                    _ => e.name.clone(),
+                                },
                                 active: e.running == Some(si),
                                 dim: e.running.is_none(),
                             })
@@ -628,7 +642,11 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
                             if session.tabs.len() == 1 { "" } else { "s" },
                             panes,
                             if panes == 1 { "" } else { "s" },
-                            if session.agent { " · agent" } else { "" },
+                            if session.agent {
+                                format!(" · agent · {}", crate::agent::age(session.last_activity))
+                            } else {
+                                String::new()
+                            },
                         )),
                         SetAttribute(Attribute::Reset),
                     )?;
