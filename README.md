@@ -20,6 +20,8 @@ rmux list            # sessions: tabs, panes, attach state (colored on tty)
 Detach with **Ctrl+g** (or just close the terminal / drop the SSH
 connection — the session keeps running).
 
+![rmux with three panes across a vertical and horizontal split, and two tabs in the tab bar](assets/overview.png)
+
 ## Running under systemd
 
 `rmux.service` is a **system** service: it starts at boot and runs
@@ -109,6 +111,10 @@ meanings are unavailable inside it: ctrl+k (readline kill-line), ctrl+l
 - **Ctrl+o** opens the session manager (lists sessions by name)
 - **Ctrl+n** opens the tab manager for the current session (lists its
   tabs by name)
+
+![the session manager overlay](assets/sessions.png)
+
+![the tab manager overlay](assets/tabs.png)
 
 Both managers use the same controls, with `*` marking the active entry:
 
