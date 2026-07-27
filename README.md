@@ -123,19 +123,25 @@ swallowed by rmux and never reach the inner shell.
 | Capability | Keys / command | Notes |
 |---|---|---|
 | Sessions | `rmux a <name>` | Created on first attach; survive disconnects; one client per session (a new attach kicks the old) |
-| Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | Always 50/50; a pane's sibling takes its space when the shell exits |
+| Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | Always 50/50; the new shell opens in the directory of the pane it was split from; a pane's sibling takes its space when the shell exits |
 | Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip |
 | Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
 | Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000); typing snaps back to live. Apps that track the mouse or run full-screen get the events instead |
 | Select to copy | drag · double-click = word · click = focus pane | `select_copy:` (default on). Releasing copies to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes. Panes tracking the mouse (vim, htop) get the mouse instead |
+| App clipboard | automatic | OSC 52 yanks from programs inside panes (helix `space+y`, vim) are forwarded to your local clipboard, clipboard/primary register preserved |
+| Theme-native colors | automatic | Palette-indexed colors and default fg/bg pass through to your terminal, so panes follow its theme; truecolor is preserved exactly |
 | Session manager | `ctrl+o` | `j/k` move · `enter` switch · `n` new · `r` rename · `x` kill · `/` search · `esc` close |
 | Agent list | `a` inside the session manager | Agent sessions only, most-recently-active first, with ages |
 | Tab manager | `ctrl+n` | Same controls as the session manager |
 | Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |
 | Commands | `commands:` in the config | The chord types `<program><Enter>` into the focused pane |
+| Shell | `shell:` in the config | Spawned in every pane; unset falls back to `$SHELL`, the passwd entry, then `/bin/sh` |
+| Shell environment | `terminal_envs:` in the config | Env vars for every spawned shell; default is exactly `TERM=xterm-256color` |
 | Start directory | `start_dir:` in the config | Where new shells start; unset = your home directory |
+| Accent color | `accent:` in the config | Hex color for the focused-pane frame, tab chip, and selectors; unset follows your terminal palette's cyan |
+| Rebindable keys | `keybindings:` in the config | Every control chord above can be remapped (`[ctrl+][alt+]<char>` or `F1`–`F12`); bound chords never reach the inner shell |
 | Tab bar position | `bar_position:` in the config | `bottom` (default) or `top`; applies live on config reload |
-| Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`start_dir`/`terminal_envs` to new shells |
+| Hot reload | edit `config.yaml` | Applies within ~1s of saving: accent, keys, pins, `select_copy`, and `bar_position` live; `shell`, `start_dir`, `terminal_envs`, and `scrollback_lines` to new shells. A broken config is rejected and logged |
 | Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
 | State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/rmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
 | Auto-run on restore | `ctrl+s` on a pane | Declare a command for the focused pane; it is typed into the restored shell after a server restart. Enter saves, empty clears, esc cancels |
