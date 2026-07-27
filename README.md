@@ -83,6 +83,9 @@ scrollback_lines: 5000
 # mouse select-to-copy (clipboard via OSC 52, works over SSH)
 select_copy: true
 
+# tab bar position: bottom (default) or top
+bar_position: bottom
+
 terminal_envs:
   TERM: xterm-256color
 
@@ -130,6 +133,7 @@ swallowed by rmux and never reach the inner shell.
 | Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |
 | Commands | `commands:` in the config | The chord types `<program><Enter>` into the focused pane |
 | Start directory | `start_dir:` in the config | Where new shells start; unset = your home directory |
+| Tab bar position | `bar_position:` in the config | `bottom` (default) or `top`; applies live on config reload |
 | Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`start_dir`/`terminal_envs` to new shells |
 | Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
 | State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/rmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |

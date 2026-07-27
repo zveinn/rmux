@@ -396,7 +396,14 @@ pub fn run() -> Result<()> {
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             match &clients[ci].mode {
                 Mode::Running => {
-                    draw_session(&mut renderer, &sessions[si], &mut buf, size, config.accent)?;
+                    draw_session(
+                        &mut renderer,
+                        &sessions[si],
+                        &mut buf,
+                        size,
+                        config.accent,
+                        config.bar_top,
+                    )?;
                 }
                 Mode::Manager { overlay, selected } => match overlay {
                     Overlay::Sessions { agents } => {

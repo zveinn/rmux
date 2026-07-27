@@ -14,6 +14,9 @@ scrollback_lines: 5000
 # over SSH when your terminal supports it)
 select_copy: true
 
+# tab bar position: bottom (default) or top
+bar_position: bottom
+
 terminal_envs:
   TERM: xterm-256color
 

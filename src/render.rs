@@ -52,11 +52,13 @@ pub fn draw_session(
     out: &mut impl Write,
     size: (u16, u16),
     accent: Color,
+    bar_top: bool,
 ) -> Result<()> {
     let content = content_size(size);
     let full = Rect {
         x: 0,
-        y: 0,
+        // With the bar on top, the pane area shifts down one row.
+        y: u16::from(bar_top && size.1 >= 2),
         w: content.0,
         h: content.1,
     };
@@ -82,7 +84,8 @@ pub fn draw_session(
     }
 
     if size.1 >= 2 {
-        draw_tab_bar(out, session, size, accent)?;
+        let row = if bar_top { 0 } else { size.1 - 1 };
+        draw_tab_bar(out, session, size, accent, row)?;
     }
 
     if let Some((x, y)) = cursor {
@@ -93,11 +96,17 @@ pub fn draw_session(
     Ok(())
 }
 
-/// The bottom bar: the session name as an accent chip, then the tabs —
-/// the open tab in accent, the rest dim. Segments past the right edge
-/// are dropped.
-fn draw_tab_bar(out: &mut impl Write, session: &Session, size: (u16, u16), accent: Color) -> Result<()> {
-    queue!(out, MoveTo(0, size.1 - 1), SetAttribute(Attribute::Reset))?;
+/// The tab bar (top or bottom row): the session name as an accent chip,
+/// then the tabs — the open tab in accent, the rest dim. Segments past
+/// the right edge are dropped.
+fn draw_tab_bar(
+    out: &mut impl Write,
+    session: &Session,
+    size: (u16, u16),
+    accent: Color,
+    row: u16,
+) -> Result<()> {
+    queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
     let cols = size.0 as usize;
     let mut used = 0usize;
 

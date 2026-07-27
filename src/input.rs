@@ -338,6 +338,7 @@ fn apply_select(
     active: usize,
     size: (u16, u16),
     enabled: bool,
+    bar_top: bool,
 ) -> Option<String> {
     use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
     use libghostty_vt::selection::FormatOptions;
@@ -350,8 +351,10 @@ fn apply_select(
         MouseEvent::Release { x, y, raw } => (*x, *y, raw, 2),
         _ => return None,
     };
-    // 1-based screen coords -> 0-based content coords.
-    let (px, py) = (x.saturating_sub(1), y.saturating_sub(1));
+    // 1-based screen coords -> 0-based content coords (a top bar
+    // shifts the content down one row; clicks on the bar are ignored).
+    let px = x.saturating_sub(1);
+    let py = y.checked_sub(1 + u16::from(bar_top))?;
 
     // Pane rectangles of the visible tab.
     let session = &mut sessions[active];
@@ -877,6 +880,7 @@ pub fn handle_input(
                             *active,
                             size,
                             config.select_copy,
+                            config.bar_top,
                         ) {
                             copied = Some(text);
                         }

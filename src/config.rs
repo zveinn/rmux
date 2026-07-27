@@ -76,6 +76,9 @@ pub struct Config {
     /// Mouse select-to-copy (`select_copy: true`): drag selects text in
     /// a pane, releasing copies it to the client's clipboard via OSC 52.
     pub select_copy: bool,
+    /// Tab bar at the top of the screen (`bar_position: top`) instead
+    /// of the default bottom.
+    pub bar_top: bool,
 }
 
 /// The server's controls: config name, default key, action.
@@ -120,6 +123,8 @@ struct RawConfig {
     scrollback_lines: Option<usize>,
     #[serde(default)]
     select_copy: Option<bool>,
+    #[serde(default)]
+    bar_position: Option<String>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -147,6 +152,7 @@ pub fn load() -> Result<Config, String> {
             start_dir: None,
             scrollback_lines: None,
             select_copy: None,
+            bar_position: None,
         },
     };
 
@@ -283,6 +289,16 @@ pub fn load() -> Result<Config, String> {
         None => 5000,
     };
 
+    let bar_top = match raw.bar_position.as_deref().map(str::trim) {
+        None | Some("") | Some("bottom") => false,
+        Some("top") => true,
+        Some(other) => {
+            return Err(format!(
+                "invalid bar_position \"{other}\" (expected top or bottom)"
+            ));
+        }
+    };
+
     Ok(Config {
         bindings,
         pins,
@@ -292,6 +308,7 @@ pub fn load() -> Result<Config, String> {
         start_dir,
         scrollback_lines,
         select_copy: raw.select_copy.unwrap_or(true),
+        bar_top,
     })
 }
 
