@@ -36,6 +36,7 @@ keybindings:
   focus-down: ctrl+j
   detach: ctrl+g
   fullscreen: ctrl+f
+  terminal-settings: ctrl+s
 
 sessions:
   1: { name: meow, key: F7 }

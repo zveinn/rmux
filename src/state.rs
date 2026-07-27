@@ -39,8 +39,11 @@ struct SavedTab {
 enum SavedLayout {
     /// A shell, with the directory it was in (absent when unknown).
     Pane {
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// Typed + run in the restored shell (terminal-settings prompt).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auto_run: Option<String>,
     },
     Split {
         dir: SavedDir,
@@ -68,9 +71,13 @@ fn path() -> Option<std::path::PathBuf> {
 fn capture_layout(layout: &Layout) -> SavedLayout {
     match layout {
         // `Empty` is a transient placeholder; treat it as a plain pane.
-        Layout::Empty => SavedLayout::Pane { cwd: None },
+        Layout::Empty => SavedLayout::Pane {
+            cwd: None,
+            auto_run: None,
+        },
         Layout::Leaf(pane) => SavedLayout::Pane {
             cwd: pane.pty.cwd(),
+            auto_run: pane.auto_run.clone(),
         },
         Layout::Split { dir, a, b } => SavedLayout::Split {
             dir: match dir {
@@ -123,11 +130,17 @@ pub fn save(sessions: &[Session]) {
 
 fn build_layout(saved: &SavedLayout, rect: Rect, config: &Config) -> Result<Layout> {
     Ok(match saved {
-        SavedLayout::Pane { cwd } => Layout::Leaf(Pane::new_in(
-            (rect.w.max(1), rect.h.max(1)),
-            config,
-            cwd.as_deref(),
-        )?),
+        SavedLayout::Pane { cwd, auto_run } => {
+            let mut pane = Pane::new_in((rect.w.max(1), rect.h.max(1)), config, cwd.as_deref())?;
+            if let Some(cmd) = auto_run {
+                // Typed into the shell: it sits in the pty buffer until
+                // the shell reads it, joins history, answers Ctrl+C.
+                pane.pty.write(cmd.as_bytes());
+                pane.pty.write(b"\r");
+                pane.auto_run = Some(cmd.clone());
+            }
+            Layout::Leaf(pane)
+        }
         SavedLayout::Split { dir, a, b } => {
             let dir = match dir {
                 SavedDir::Horizontal => SplitDir::Horizontal,

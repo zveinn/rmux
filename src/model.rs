@@ -53,6 +53,9 @@ pub struct Pane {
     /// (register, text) until the server forwards them to the attached
     /// client (helix/vim yank-to-clipboard).
     pub clipboard: Rc<std::cell::RefCell<Vec<(char, String)>>>,
+    /// Command typed into the shell when this pane is restored after a
+    /// server restart (set via the terminal-settings prompt).
+    pub auto_run: Option<String>,
 }
 
 /// How a split divides a pane's rectangle.
@@ -335,6 +338,7 @@ impl Pane {
             pty,
             term,
             clipboard,
+            auto_run: None,
         })
     }
 

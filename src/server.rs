@@ -517,6 +517,16 @@ pub fn run() -> Result<()> {
                         draw_manager(&mut buf, &view, size, config.accent)?;
                     }
                 },
+                Mode::PaneSettings { text } => {
+                    draw_naming(
+                        &mut buf,
+                        "terminal settings · auto-run on restore",
+                        text,
+                        size,
+                        config.accent,
+                        "enter save · empty clears · esc cancel",
+                    )?;
+                }
                 Mode::Naming {
                     overlay,
                     name,
@@ -595,6 +605,7 @@ fn handle_frame(
             // Take the mode out so `clients` stays free for kick handling.
             let mut mode = std::mem::take(&mut clients[ci].mode);
             let mut select = std::mem::take(&mut clients[ci].select);
+            let was_settings = matches!(mode, Mode::PaneSettings { .. });
             let overlay_involved = !matches!(mode, Mode::Running);
             let (detach, copied) = handle_input(
                 &payload,
@@ -614,6 +625,12 @@ fn handle_frame(
             // clipboard via OSC 52 (in-band, so it works over SSH).
             if let Some(text) = copied {
                 clients[ci].send(S2C_OUTPUT, &osc52(&text));
+            }
+
+            // Persist a freshly confirmed auto-run right away instead of
+            // waiting for the periodic save.
+            if was_settings && !matches!(clients[ci].mode, Mode::PaneSettings { .. }) {
+                crate::state::save(sessions);
             }
 
             if detach {

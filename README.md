@@ -106,6 +106,7 @@ keybindings:
   focus-down: ctrl+j
   detach: ctrl+g
   fullscreen: ctrl+f
+  terminal-settings: ctrl+s
 
 sessions:
   1: { name: project1, key: F1 }
@@ -137,6 +138,7 @@ swallowed by rmux and never reach the inner shell.
 | Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`start_dir`/`terminal_envs` to new shells |
 | Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
 | State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/rmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
+| Auto-run on restore | `ctrl+s` on a pane | Declare a command for the focused pane; it is typed into the restored shell after a server restart. Enter saves, empty clears, esc cancels |
 | Agent mode | `rmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
 | Listing | `rmux list` | Colored on a tty, plain when piped (agents parse this) |
 

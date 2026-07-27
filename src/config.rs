@@ -82,7 +82,7 @@ pub struct Config {
 }
 
 /// The server's controls: config name, default key, action.
-const ACTIONS: [(&str, &str, InputAction); 11] = [
+const ACTIONS: [(&str, &str, InputAction); 12] = [
     ("session-manager", "ctrl+o", InputAction::Manager(Overlay::Sessions { agents: false })),
     ("tab-manager", "ctrl+n", InputAction::Manager(Overlay::Tabs)),
     ("split-horizontal", "ctrl+k", InputAction::SplitH),
@@ -94,6 +94,7 @@ const ACTIONS: [(&str, &str, InputAction); 11] = [
     ("focus-down", "ctrl+r", InputAction::FocusDir(NavDir::Down)),
     ("detach", "ctrl+g", InputAction::Detach),
     ("fullscreen", "ctrl+f", InputAction::Fullscreen),
+    ("terminal-settings", "ctrl+s", InputAction::PaneSettings),
 ];
 
 #[derive(serde::Deserialize)]

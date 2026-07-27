@@ -36,6 +36,9 @@ pub enum Mode {
         /// `None` = creating something new; `Some` = renaming this.
         rename: Option<RenameTarget>,
     },
+    /// The per-pane settings prompt: the auto-run command typed into
+    /// the focused pane's shell when the layout is restored.
+    PaneSettings { text: String },
 }
 
 /// What a rename prompt applies to.
@@ -67,6 +70,8 @@ pub enum InputAction {
     /// Switch to the pinned session at this index in `Config::pins`,
     /// starting it if it isn't running.
     OpenSession(usize),
+    /// Open the per-pane settings prompt (auto-run command).
+    PaneSettings,
 }
 
 /// One row of the session-manager list: every pinned session (running or
@@ -959,7 +964,7 @@ pub enum NamingOutcome {
 }
 
 /// Apply key presses to the name being typed in the name prompt.
-pub fn naming_apply(buf: &[u8], name: &mut String) -> NamingOutcome {
+pub fn naming_apply(buf: &[u8], name: &mut String, max: usize) -> NamingOutcome {
     for ch in String::from_utf8_lossy(buf).chars() {
         match ch {
             '\r' | '\n' => return NamingOutcome::Create,
@@ -967,7 +972,7 @@ pub fn naming_apply(buf: &[u8], name: &mut String) -> NamingOutcome {
             '\u{7f}' | '\u{8}' => {
                 name.pop();
             }
-            c if !c.is_control() && name.chars().count() < 40 => name.push(c),
+            c if !c.is_control() && name.chars().count() < max => name.push(c),
             _ => {}
         }
     }
@@ -1044,7 +1049,7 @@ pub fn handle_input(
                 }
             }
         }
-        Mode::Naming { .. } => {}
+        Mode::Naming { .. } | Mode::PaneSettings { .. } => {}
     }
     synthetic.extend_from_slice(&clean);
     let mut buf: &[u8] = &synthetic;
@@ -1083,6 +1088,16 @@ pub fn handle_input(
                         let session = &mut sessions[*active];
                         let tab = &mut session.tabs[session.active_tab];
                         tab.set_zoom(!tab.zoomed, size)?;
+                    }
+                    InputAction::PaneSettings => {
+                        let session = &sessions[*active];
+                        let tab = &session.tabs[session.active_tab];
+                        let text = tab
+                            .layout
+                            .pane(tab.focused)
+                            .and_then(|p| p.auto_run.clone())
+                            .unwrap_or_default();
+                        next_mode = Some(Mode::PaneSettings { text });
                     }
                     InputAction::SplitH | InputAction::SplitV => {
                         let dir = match action {
@@ -1175,7 +1190,7 @@ pub fn handle_input(
                 name,
                 rename,
             } => {
-                match naming_apply(buf, name) {
+                match naming_apply(buf, name, 40) {
                     NamingOutcome::Pending => {}
                     NamingOutcome::Cancel => {
                         let selected = match overlay {
@@ -1246,6 +1261,24 @@ pub fn handle_input(
                                 next_mode = Some(Mode::Running);
                             }
                         }
+                    }
+                }
+                buf = &[];
+            }
+            Mode::PaneSettings { text } => {
+                match naming_apply(buf, text, 200) {
+                    NamingOutcome::Pending => {}
+                    NamingOutcome::Cancel => next_mode = Some(Mode::Running),
+                    NamingOutcome::Create => {
+                        let cmd = std::mem::take(text).trim().to_string();
+                        let session = &mut sessions[*active];
+                        let tab = &mut session.tabs[session.active_tab];
+                        let focused = tab.focused;
+                        if let Some(pane) = tab.layout.pane_mut(focused) {
+                            // Empty clears the auto-run.
+                            pane.auto_run = (!cmd.is_empty()).then_some(cmd);
+                        }
+                        next_mode = Some(Mode::Running);
                     }
                 }
                 buf = &[];
