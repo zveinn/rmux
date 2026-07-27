@@ -436,62 +436,85 @@ pub fn run() -> Result<()> {
                             .max()
                             .unwrap_or(0);
                         let query = search.as_deref();
-                        let items: Vec<ListItem> = entries
-                            .iter()
-                            .filter(|e| {
-                                query.is_none_or(|q| crate::input::name_matches(&e.name, q))
-                            })
-                            .map(|e| ListItem {
-                                label: match (*agents, e.running) {
-                                    (true, Some(esi)) => format!(
-                                        "{:<name_width$}  · {}",
-                                        e.name,
-                                        agent::age(sessions[esi].last_activity),
-                                    ),
-                                    _ => e.name.clone(),
-                                },
-                                active: e.running == Some(si),
-                                dim: e.running.is_none(),
-                            })
-                            .collect();
+                        let mut min_interior = 0;
+                        let mut items: Vec<ListItem> = Vec::new();
+                        for e in &entries {
+                            let label = match (*agents, e.running) {
+                                (true, Some(esi)) => format!(
+                                    "{:<name_width$}  · {}",
+                                    e.name,
+                                    agent::age(sessions[esi].last_activity),
+                                ),
+                                _ => e.name.clone(),
+                            };
+                            min_interior = min_interior.max(label.chars().count() + 4);
+                            if query.is_none_or(|q| crate::input::name_matches(&e.name, q)) {
+                                items.push(ListItem {
+                                    label,
+                                    active: e.running == Some(si),
+                                    dim: e.running.is_none(),
+                                });
+                            }
+                        }
                         let (title, toggle) = if *agents {
                             ("agent sessions", "a normal")
                         } else {
                             ("sessions", "a agents")
                         };
+                        let full_footer = format!(
+                            "enter switch · n new · r rename · x kill · {toggle} · / search · esc close"
+                        );
+                        // Width stays pinned to the normal footer so the
+                        // panel doesn't jump when a search starts.
+                        min_interior = min_interior.max(full_footer.chars().count());
                         let footer = match query {
-                            Some(q) => format!("/{q}▏ enter switch · esc cancel"),
-                            None => format!(
-                                "enter switch · n new · r rename · x kill · {toggle} · / search · esc close"
-                            ),
+                            Some(_) => "enter switch · esc cancel".to_string(),
+                            None => full_footer,
                         };
-                        let selected = (*selected).min(items.len().saturating_sub(1));
-                        draw_manager(&mut buf, title, &items, selected, size, config.accent, &footer)?;
+                        let view = crate::render::ManagerView {
+                            title,
+                            items: &items,
+                            selected: (*selected).min(items.len().saturating_sub(1)),
+                            footer: &footer,
+                            search: query,
+                            min_rows: entries.len(),
+                            min_interior,
+                        };
+                        draw_manager(&mut buf, &view, size, config.accent)?;
                     }
                     Overlay::Tabs => {
                         let session = &sessions[si];
                         let query = search.as_deref();
-                        let items: Vec<ListItem> = session
-                            .tabs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, t)| {
-                                query.is_none_or(|q| crate::input::name_matches(&t.name, q))
-                            })
-                            .map(|(ti, t)| ListItem {
-                                label: t.name.clone(),
-                                active: ti == session.active_tab,
-                                dim: false,
-                            })
-                            .collect();
+                        let mut min_interior = 0;
+                        let mut items: Vec<ListItem> = Vec::new();
+                        for (ti, t) in session.tabs.iter().enumerate() {
+                            min_interior = min_interior.max(t.name.chars().count() + 4);
+                            if query.is_none_or(|q| crate::input::name_matches(&t.name, q)) {
+                                items.push(ListItem {
+                                    label: t.name.clone(),
+                                    active: ti == session.active_tab,
+                                    dim: false,
+                                });
+                            }
+                        }
                         let title = format!("{} · tabs", session.name);
+                        let full_footer =
+                            "enter switch · n new · r rename · x kill · / search · esc close";
+                        min_interior = min_interior.max(full_footer.chars().count());
                         let footer = match query {
-                            Some(q) => format!("/{q}▏ enter switch · esc cancel"),
-                            None => "enter switch · n new · r rename · x kill · / search · esc close"
-                                .to_string(),
+                            Some(_) => "enter switch · esc cancel".to_string(),
+                            None => full_footer.to_string(),
                         };
-                        let selected = (*selected).min(items.len().saturating_sub(1));
-                        draw_manager(&mut buf, &title, &items, selected, size, config.accent, &footer)?;
+                        let view = crate::render::ManagerView {
+                            title: &title,
+                            items: &items,
+                            selected: (*selected).min(items.len().saturating_sub(1)),
+                            footer: &footer,
+                            search: query,
+                            min_rows: session.tabs.len(),
+                            min_interior,
+                        };
+                        draw_manager(&mut buf, &view, size, config.accent)?;
                     }
                 },
                 Mode::Naming {

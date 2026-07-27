@@ -335,15 +335,35 @@ fn draw_panel(
 /// Draw a manager overlay: a centered panel listing sessions or tabs,
 /// with a `❯` selector, an accent dot on the open entry, and stopped
 /// entries dimmed.
+pub struct ManagerView<'a> {
+    pub title: &'a str,
+    /// Entries to show (already filtered when a search is active).
+    pub items: &'a [ListItem],
+    pub selected: usize,
+    pub footer: &'a str,
+    /// Active `/` query, drawn as a search bar in the panel's top row.
+    pub search: Option<&'a str>,
+    /// Reserve space for at least this many rows / this interior width,
+    /// so the panel doesn't jump around while a search filters it.
+    pub min_rows: usize,
+    pub min_interior: usize,
+}
+
 pub fn draw_manager(
     out: &mut impl Write,
-    title: &str,
-    items: &[ListItem],
-    selected: usize,
+    view: &ManagerView,
     size: (u16, u16),
     accent: Color,
-    footer: &str,
 ) -> Result<()> {
+    let ManagerView {
+        title,
+        items,
+        selected,
+        footer,
+        search,
+        min_rows,
+        min_interior,
+    } = *view;
     queue!(
         out,
         BeginSynchronizedUpdate,
@@ -359,11 +379,28 @@ pub fn draw_manager(
     let min_interior = items
         .iter()
         .map(|i| i.label.chars().count() + 4)
-        .chain([footer.chars().count()])
+        .chain([footer.chars().count(), min_interior])
         .max()
         .unwrap_or(0);
-    let body_rows = shown.len() as u16 + 3;
+    // Filtering leaves blank rows instead of shrinking the panel.
+    let list_rows = shown.len().max(min_rows.min(max_shown));
+    let body_rows = list_rows as u16 + 3;
     let panel = draw_panel(out, title, body_rows, min_interior, size)?;
+
+    // The search bar sits in the blank row under the title.
+    if let Some(query) = search {
+        queue!(
+            out,
+            MoveTo(panel.x + 2, panel.y + 1),
+            SetForegroundColor(accent),
+            Print("/"),
+            SetForegroundColor(Color::Reset),
+            Print(fit(query, panel.iw.saturating_sub(3))),
+            SetForegroundColor(accent),
+            Print("▏"),
+            SetForegroundColor(Color::Reset),
+        )?;
+    }
 
     for (row, item) in shown.iter().enumerate() {
         let is_selected = offset + row == selected;
