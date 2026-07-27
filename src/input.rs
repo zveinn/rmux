@@ -22,8 +22,13 @@ pub enum Mode {
     /// The viewed tab's panes.
     #[default]
     Running,
-    /// A manager overlay, with the highlighted entry.
-    Manager { overlay: Overlay, selected: usize },
+    /// A manager overlay, with the highlighted entry. `search` holds
+    /// the `/` filter query while the user is typing one.
+    Manager {
+        overlay: Overlay,
+        selected: usize,
+        search: Option<String>,
+    },
     /// The name prompt for a session/tab being created or renamed.
     Naming {
         overlay: Overlay,
@@ -618,6 +623,8 @@ pub enum MgrAction {
     Kill,
     /// Flip the session manager between normal and agent sessions.
     ToggleAgents,
+    /// Start typing a `/` filter.
+    Search,
     Close,
 }
 
@@ -637,6 +644,8 @@ enum MgrOutcome {
     Kill(usize),
     /// Flip between the normal and agent session lists.
     ToggleAgents,
+    /// Open the `/` filter prompt.
+    StartSearch,
 }
 
 /// Parse manager-mode key presses from raw stdin bytes. The chords bound
@@ -662,6 +671,7 @@ pub fn manager_actions(buf: &[u8], bindings: &[Binding]) -> Vec<MgrAction> {
             b'r' => actions.push(MgrAction::Rename),
             b'x' => actions.push(MgrAction::Kill),
             b'a' => actions.push(MgrAction::ToggleAgents),
+            b'/' => actions.push(MgrAction::Search),
             b'j' => actions.push(MgrAction::Down),
             b'k' => actions.push(MgrAction::Up),
             b'q' => actions.push(MgrAction::Close),
@@ -698,10 +708,124 @@ fn manager_apply(actions: &[MgrAction], selected: &mut usize, count: usize) -> M
             MgrAction::Rename => return MgrOutcome::Rename(*selected),
             MgrAction::Kill => return MgrOutcome::Kill(*selected),
             MgrAction::ToggleAgents => return MgrOutcome::ToggleAgents,
+            MgrAction::Search => return MgrOutcome::StartSearch,
             MgrAction::Close => return MgrOutcome::Close,
         }
     }
     MgrOutcome::Stay
+}
+
+/// Case-insensitive substring match for `/` filters.
+pub fn name_matches(name: &str, query: &str) -> bool {
+    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// The names the manager currently lists (used for `/` filtering).
+pub fn manager_names(overlay: Overlay, sessions: &[Session], active: usize, pins: &[Pin]) -> Vec<String> {
+    match overlay {
+        Overlay::Sessions { agents } => crate::agent::manager_entries(pins, sessions, agents)
+            .into_iter()
+            .map(|e| e.name)
+            .collect(),
+        Overlay::Tabs => sessions[active].tabs.iter().map(|t| t.name.clone()).collect(),
+    }
+}
+
+/// Handle keys while a `/` filter is being typed: text edits the query,
+/// arrows move within the matches, Enter switches to the selection, a
+/// bare Esc cancels the search.
+fn run_search(
+    buf: &[u8],
+    overlay: Overlay,
+    selected: &mut usize,
+    query: &mut String,
+    sessions: &mut Vec<Session>,
+    active: &mut usize,
+    size: (u16, u16),
+    config: &Config,
+) -> Result<Option<Mode>> {
+    let matches = |query: &str, sessions: &[Session], active: usize| -> Vec<usize> {
+        manager_names(overlay, sessions, active, &config.pins)
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| name_matches(name, query))
+            .map(|(idx, _)| idx)
+            .collect()
+    };
+    let mut text = String::new();
+    let mut i = 0;
+    while i < buf.len() {
+        match buf[i] {
+            b'\r' | b'\n' => {
+                query.push_str(&text);
+                let matched = matches(query, sessions, *active);
+                let Some(&orig) = matched.get((*selected).min(matched.len().saturating_sub(1)))
+                else {
+                    return Ok(None); // no matches: stay in the search
+                };
+                match overlay {
+                    Overlay::Sessions { agents } => {
+                        let entries =
+                            crate::agent::manager_entries(&config.pins, sessions, agents);
+                        if let Some(entry) = entries.get(orig) {
+                            *active = match entry.running {
+                                Some(si) => si,
+                                None => {
+                                    create_session(sessions, config, size, entry.name.clone())?
+                                }
+                            };
+                        }
+                    }
+                    Overlay::Tabs => sessions[*active].active_tab = orig,
+                }
+                return Ok(Some(Mode::Running));
+            }
+            0x1b => {
+                if buf[i + 1..].starts_with(b"[A") {
+                    *selected = selected.saturating_sub(1);
+                    i += 3;
+                    continue;
+                }
+                if buf[i + 1..].starts_with(b"[B") {
+                    query.push_str(&text);
+                    text.clear();
+                    let count = matches(query, sessions, *active).len();
+                    *selected = (*selected + 1).min(count.saturating_sub(1));
+                    i += 3;
+                    continue;
+                }
+                // Bare Esc: drop the filter, back to the plain manager.
+                return Ok(Some(Mode::Manager {
+                    overlay,
+                    selected: 0,
+                    search: None,
+                }));
+            }
+            0x7f | 0x08 => {
+                if text.pop().is_none() {
+                    query.pop();
+                }
+                *selected = 0;
+            }
+            c if c.is_ascii() && c.is_ascii_control() => {}
+            _ => {
+                // Collect the typed byte run; decoded below in one go.
+                let start = i;
+                while i + 1 < buf.len() && buf[i + 1] >= 0x80 {
+                    i += 1;
+                }
+                text.push_str(&String::from_utf8_lossy(&buf[start..=i]));
+                *selected = 0;
+            }
+        }
+        i += 1;
+    }
+    if !text.is_empty() {
+        query.push_str(&text);
+        let cap = query.char_indices().nth(40).map_or(query.len(), |(n, _)| n);
+        query.truncate(cap);
+    }
+    Ok(None)
 }
 
 /// Apply manager key presses to whichever list the overlay shows.
@@ -726,12 +850,18 @@ pub fn run_manager(
     Ok(match manager_apply(actions, selected, count.max(1)) {
         MgrOutcome::Stay => None,
         MgrOutcome::Close => Some(Mode::Running),
+        MgrOutcome::StartSearch => Some(Mode::Manager {
+            overlay,
+            selected: 0,
+            search: Some(String::new()),
+        }),
         MgrOutcome::ToggleAgents => match overlay {
             Overlay::Sessions { agents } => {
                 *selected = 0;
                 Some(Mode::Manager {
                     overlay: Overlay::Sessions { agents: !agents },
                     selected: 0,
+                    search: None,
                 })
             }
             Overlay::Tabs => None,
@@ -905,10 +1035,10 @@ pub fn handle_input(
             for event in &mouse {
                 match event {
                     MouseEvent::Wheel { up: true, .. } | MouseEvent::Page { up: true } => {
-                        synthetic.push(b'k');
+                        synthetic.extend_from_slice(b"\x1b[A");
                     }
                     MouseEvent::Wheel { up: false, .. } | MouseEvent::Page { up: false } => {
-                        synthetic.push(b'j');
+                        synthetic.extend_from_slice(b"\x1b[B");
                     }
                     _ => {}
                 }
@@ -1013,22 +1143,31 @@ pub fn handle_input(
                                 size,
                                 config,
                             )?
-                            .unwrap_or(Mode::Manager { overlay, selected }),
+                            .unwrap_or(Mode::Manager { overlay, selected, search: None }),
                         );
                         buf = &[];
                     }
                 }
             }
-            Mode::Manager { overlay, selected } => {
-                next_mode = run_manager(
-                    &manager_actions(buf, bindings),
-                    *overlay,
-                    selected,
-                    sessions,
-                    active,
-                    size,
-                    config,
-                )?;
+            Mode::Manager {
+                overlay,
+                selected,
+                search,
+            } => {
+                next_mode = match search {
+                    Some(query) => run_search(
+                        buf, *overlay, selected, query, sessions, active, size, config,
+                    )?,
+                    None => run_manager(
+                        &manager_actions(buf, bindings),
+                        *overlay,
+                        selected,
+                        sessions,
+                        active,
+                        size,
+                        config,
+                    )?,
+                };
                 buf = &[];
             }
             Mode::Naming {
@@ -1046,6 +1185,7 @@ pub fn handle_input(
                         next_mode = Some(Mode::Manager {
                             overlay: *overlay,
                             selected,
+                            search: None,
                         });
                     }
                     NamingOutcome::Create => {
@@ -1063,6 +1203,7 @@ pub fn handle_input(
                                 next_mode = Some(Mode::Manager {
                                     overlay: *overlay,
                                     selected: *active,
+                                    search: None,
                                 });
                             }
                             Some(RenameTarget::Tab(ti)) => {
@@ -1074,6 +1215,7 @@ pub fn handle_input(
                                 next_mode = Some(Mode::Manager {
                                     overlay: *overlay,
                                     selected: *ti,
+                                    search: None,
                                 });
                             }
                             None => {

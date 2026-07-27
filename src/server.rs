@@ -376,6 +376,7 @@ pub fn run() -> Result<()> {
                 if let Mode::Manager {
                     overlay,
                     ref mut selected,
+                    ..
                 } = client.mode
                 {
                     let count = match overlay {
@@ -420,7 +421,11 @@ pub fn run() -> Result<()> {
                         config.bar_top,
                     )?;
                 }
-                Mode::Manager { overlay, selected } => match overlay {
+                Mode::Manager {
+                    overlay,
+                    selected,
+                    search,
+                } => match overlay {
                     Overlay::Sessions { agents } => {
                         let entries = agent::manager_entries(&config.pins, &sessions, *agents);
                         // Agent view: append each session's last-activity
@@ -430,8 +435,12 @@ pub fn run() -> Result<()> {
                             .map(|e| e.name.chars().count())
                             .max()
                             .unwrap_or(0);
+                        let query = search.as_deref();
                         let items: Vec<ListItem> = entries
                             .iter()
+                            .filter(|e| {
+                                query.is_none_or(|q| crate::input::name_matches(&e.name, q))
+                            })
                             .map(|e| ListItem {
                                 label: match (*agents, e.running) {
                                     (true, Some(esi)) => format!(
@@ -450,18 +459,25 @@ pub fn run() -> Result<()> {
                         } else {
                             ("sessions", "a agents")
                         };
-                        let footer = format!(
-                            "enter switch · n new · r rename · x kill · {toggle} · esc close"
-                        );
+                        let footer = match query {
+                            Some(q) => format!("/{q}▏ enter switch · esc cancel"),
+                            None => format!(
+                                "enter switch · n new · r rename · x kill · {toggle} · / search · esc close"
+                            ),
+                        };
                         let selected = (*selected).min(items.len().saturating_sub(1));
                         draw_manager(&mut buf, title, &items, selected, size, config.accent, &footer)?;
                     }
                     Overlay::Tabs => {
                         let session = &sessions[si];
+                        let query = search.as_deref();
                         let items: Vec<ListItem> = session
                             .tabs
                             .iter()
                             .enumerate()
+                            .filter(|(_, t)| {
+                                query.is_none_or(|q| crate::input::name_matches(&t.name, q))
+                            })
                             .map(|(ti, t)| ListItem {
                                 label: t.name.clone(),
                                 active: ti == session.active_tab,
@@ -469,8 +485,13 @@ pub fn run() -> Result<()> {
                             })
                             .collect();
                         let title = format!("{} · tabs", session.name);
-                        let footer = "enter switch · n new · r rename · x kill · esc close";
-                        draw_manager(&mut buf, &title, &items, *selected, size, config.accent, footer)?;
+                        let footer = match query {
+                            Some(q) => format!("/{q}▏ enter switch · esc cancel"),
+                            None => "enter switch · n new · r rename · x kill · / search · esc close"
+                                .to_string(),
+                        };
+                        let selected = (*selected).min(items.len().saturating_sub(1));
+                        draw_manager(&mut buf, &title, &items, selected, size, config.accent, &footer)?;
                     }
                 },
                 Mode::Naming {

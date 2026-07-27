@@ -127,7 +127,7 @@ swallowed by rmux and never reach the inner shell.
 | Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
 | Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000); typing snaps back to live. Apps that track the mouse or run full-screen get the events instead |
 | Select to copy | drag · double-click = word · click = focus pane | `select_copy:` (default on). Releasing copies to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes. Panes tracking the mouse (vim, htop) get the mouse instead |
-| Session manager | `ctrl+o` | `j/k` move · `enter` switch · `n` new · `r` rename · `x` kill · `esc` close |
+| Session manager | `ctrl+o` | `j/k` move · `enter` switch · `n` new · `r` rename · `x` kill · `/` search · `esc` close |
 | Agent list | `a` inside the session manager | Agent sessions only, most-recently-active first, with ages |
 | Tab manager | `ctrl+n` | Same controls as the session manager |
 | Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |
