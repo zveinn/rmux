@@ -88,7 +88,8 @@ terminal_envs:
 
 # chords that type a program + Enter into the focused pane
 commands:
-  alt+g: lazygit
+  ctrl+h: htop
+  ctrl+l: lazygit
 
 keybindings:
   session-manager: ctrl+o
@@ -104,7 +105,9 @@ keybindings:
   fullscreen: ctrl+f
 
 sessions:
-  1: { name: meow, key: F7 }
+  1: { name: project1, key: F1 }
+  2: { name: project2, key: F2 }
+  3: { name: random, key: F3 }
 ```
 
 Keys are `[ctrl+][alt+]<char>` or `F1`–`F12`; every binding below is
