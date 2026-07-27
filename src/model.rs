@@ -270,7 +270,7 @@ impl Pane {
         let mut term = Terminal::new(TerminalOptions {
             cols,
             rows,
-            max_scrollback: 1000,
+            max_scrollback: config.scrollback_lines,
         })?;
         term.resize(cols, rows, CELL_PX.0, CELL_PX.1)?;
 

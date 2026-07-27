@@ -5,6 +5,10 @@ shell: /usr/bin/bash
 # where new shells start; unset or empty = your home directory
 start_dir:
 
+# lines of scrollback kept per pane (scroll with the mouse wheel or
+# PageUp/PageDown; applies to new shells)
+scrollback_lines: 5000
+
 terminal_envs:
   TERM: xterm-256color
 

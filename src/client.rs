@@ -182,12 +182,21 @@ impl ScreenGuard {
     fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+        // Button-event mouse tracking + SGR encoding: wheel (and, for
+        // selection, press/drag) events arrive on stdin and are handled
+        // server-side.
+        let mut out = io::stdout();
+        out.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+        out.flush()?;
         Ok(Self)
     }
 }
 
 impl Drop for ScreenGuard {
     fn drop(&mut self) {
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x1b[?1006l\x1b[?1002l");
+        let _ = out.flush();
         let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }

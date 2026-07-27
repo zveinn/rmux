@@ -157,6 +157,113 @@ pub fn forward_input(pty: &Pty, bindings: &[Binding], buf: &[u8]) -> Option<(Inp
     None
 }
 
+/// A scroll intent extracted from raw client input.
+pub enum ScrollEvent {
+    /// Mouse wheel; `raw` keeps the original SGR bytes so panes that
+    /// track the mouse themselves get the event untouched.
+    Wheel { up: bool, raw: Vec<u8> },
+    /// PageUp / PageDown.
+    Page { up: bool },
+}
+
+/// Split raw input into (bytes to process normally, scroll events).
+/// SGR mouse sequences are always consumed here — wheel becomes an
+/// event, other mouse events are dropped so they never leak into a
+/// shell as garbage bytes. PageUp/PageDown become events too.
+pub fn extract_scroll(buf: &[u8]) -> (Vec<u8>, Vec<ScrollEvent>) {
+    let mut clean = Vec::with_capacity(buf.len());
+    let mut events = Vec::new();
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i..].starts_with(b"\x1b[<") {
+            // SGR mouse: ESC [ < Cb ; Cx ; Cy (M|m)
+            let mut j = i + 3;
+            while j < buf.len() && (buf[j].is_ascii_digit() || buf[j] == b';') {
+                j += 1;
+            }
+            if j < buf.len() && (buf[j] == b'M' || buf[j] == b'm') {
+                let cb: u32 = std::str::from_utf8(&buf[i + 3..j])
+                    .ok()
+                    .and_then(|s| s.split(';').next()?.parse().ok())
+                    .unwrap_or(0);
+                // Wheel: bit 6 set, low two bits 0 (up) or 1 (down);
+                // modifier bits may also be set.
+                if buf[j] == b'M' && cb & 64 != 0 && cb & 2 == 0 {
+                    events.push(ScrollEvent::Wheel {
+                        up: cb & 1 == 0,
+                        raw: buf[i..=j].to_vec(),
+                    });
+                }
+                i = j + 1;
+                continue;
+            }
+            if j >= buf.len() {
+                // Sequence split across reads: drop the fragment rather
+                // than leaking it into the shell.
+                break;
+            }
+        }
+        if buf[i..].starts_with(b"\x1b[5~") || buf[i..].starts_with(b"\x1b[6~") {
+            events.push(ScrollEvent::Page {
+                up: buf[i + 2] == b'5',
+            });
+            i += 4;
+            continue;
+        }
+        clean.push(buf[i]);
+        i += 1;
+    }
+    (clean, events)
+}
+
+/// Apply scroll events to the focused pane: panes tracking the mouse
+/// get the raw wheel bytes, alt-screen apps get arrow/page keys (like
+/// most terminal emulators), everything else scrolls our scrollback.
+fn apply_scroll(events: &[ScrollEvent], sessions: &mut [Session], active: usize) {
+    use libghostty_vt::screen::Screen;
+    use libghostty_vt::terminal::{Mode as TermMode, ScrollViewport};
+
+    let session = &mut sessions[active];
+    let tab = &mut session.tabs[session.active_tab];
+    let focused = tab.focused;
+    let Some(pane) = tab.layout.pane_mut(focused) else {
+        return;
+    };
+    for event in events {
+        let tracking = pane.term.is_mouse_tracking().unwrap_or(false);
+        let alt = matches!(pane.term.active_screen(), Ok(Screen::Alternate));
+        match event {
+            ScrollEvent::Wheel { up, raw } => {
+                if tracking {
+                    pane.pty.write(raw);
+                } else if alt {
+                    let key: &[u8] = match (pane.term.mode(TermMode::DECCKM), up) {
+                        (Ok(true), true) => b"\x1bOA",
+                        (Ok(true), false) => b"\x1bOB",
+                        (_, true) => b"\x1b[A",
+                        (_, false) => b"\x1b[B",
+                    };
+                    for _ in 0..3 {
+                        pane.pty.write(key);
+                    }
+                } else {
+                    let delta = if *up { -3 } else { 3 };
+                    pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+                }
+            }
+            ScrollEvent::Page { up } => {
+                if alt || tracking {
+                    pane.pty.write(if *up { b"\x1b[5~" } else { b"\x1b[6~" });
+                } else {
+                    let page = pane.term.rows().unwrap_or(24).saturating_sub(2) as isize;
+                    let delta = if *up { -page } else { page };
+                    pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+                }
+            }
+        }
+    }
+}
+
 /// A key press inside a manager overlay.
 pub enum MgrAction {
     Up,
@@ -399,7 +506,7 @@ pub fn naming_apply(buf: &[u8], name: &mut String) -> NamingOutcome {
 /// switches); `mode` is the client's overlay state. Returns true when
 /// the client asked to detach.
 pub fn handle_input(
-    mut buf: &[u8],
+    buf: &[u8],
     mode: &mut Mode,
     sessions: &mut Vec<Session>,
     active: &mut usize,
@@ -408,6 +515,37 @@ pub fn handle_input(
 ) -> Result<bool> {
     use crate::model::SplitDir;
     let bindings: &[Binding] = &config.bindings;
+
+    // Pull mouse-wheel / PageUp / PageDown out of the stream first.
+    let (clean, scroll) = extract_scroll(buf);
+    let mut synthetic: Vec<u8> = Vec::new();
+    match mode {
+        Mode::Running => {
+            apply_scroll(&scroll, sessions, *active);
+            if !clean.is_empty() {
+                // Typing snaps the view back to the live bottom.
+                use libghostty_vt::terminal::ScrollViewport;
+                let session = &mut sessions[*active];
+                let tab = &mut session.tabs[session.active_tab];
+                let focused = tab.focused;
+                if let Some(pane) = tab.layout.pane_mut(focused) {
+                    pane.term.scroll_viewport(ScrollViewport::Bottom);
+                }
+            }
+        }
+        // In a manager, wheel/page move the selection.
+        Mode::Manager { .. } => {
+            for event in &scroll {
+                synthetic.push(match event {
+                    ScrollEvent::Wheel { up: true, .. } | ScrollEvent::Page { up: true } => b'k',
+                    _ => b'j',
+                });
+            }
+        }
+        Mode::Naming { .. } => {}
+    }
+    synthetic.extend_from_slice(&clean);
+    let mut buf: &[u8] = &synthetic;
 
     loop {
         let mut next_mode = None;

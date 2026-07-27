@@ -70,6 +70,9 @@ pub struct Config {
     /// Directory new shells start in (`start_dir: /home/you/code`).
     /// When unset, the user's home directory.
     pub start_dir: Option<String>,
+    /// Lines of scrollback kept per pane (`scrollback_lines: 5000`).
+    /// Applies to shells spawned after a change.
+    pub scrollback_lines: usize,
 }
 
 /// The server's controls: config name, default key, action.
@@ -110,6 +113,8 @@ struct RawConfig {
     shell: Option<String>,
     #[serde(default)]
     start_dir: Option<String>,
+    #[serde(default)]
+    scrollback_lines: Option<usize>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -135,6 +140,7 @@ pub fn load() -> Result<Config, String> {
             terminal_envs: None,
             shell: None,
             start_dir: None,
+            scrollback_lines: None,
         },
     };
 
@@ -263,6 +269,14 @@ pub fn load() -> Result<Config, String> {
         None => None,
     };
 
+    let scrollback_lines = match raw.scrollback_lines {
+        Some(n) if n > 1_000_000 => {
+            return Err(format!("scrollback_lines {n} is too large (max 1000000)"));
+        }
+        Some(n) => n,
+        None => 5000,
+    };
+
     Ok(Config {
         bindings,
         pins,
@@ -270,6 +284,7 @@ pub fn load() -> Result<Config, String> {
         envs,
         shell,
         start_dir,
+        scrollback_lines,
     })
 }
 
