@@ -9,6 +9,11 @@ start_dir:
 # PageUp/PageDown; applies to new shells)
 scrollback_lines: 5000
 
+# mouse select-to-copy: drag to select text in a pane (double-click =
+# word, released selection lands on your clipboard via OSC 52 — works
+# over SSH when your terminal supports it)
+select_copy: true
+
 terminal_envs:
   TERM: xterm-256color
 

@@ -19,7 +19,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use crate::Result;
 use crate::agent;
 use crate::config::{self, Config};
-use crate::input::{Mode, Overlay, handle_input, session_entries};
+use crate::input::{Mode, Overlay, SelectState, handle_input, session_entries};
 use crate::model::Session;
 use crate::protocol::{
     C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK,
@@ -40,6 +40,8 @@ struct ClientConn {
     attached: Option<u64>,
     size: (u16, u16),
     mode: Mode,
+    /// Mouse select-to-copy state.
+    select: SelectState,
     needs_redraw: bool,
     /// A BYE was queued; drop the client once outbuf drains.
     closing: bool,
@@ -56,6 +58,7 @@ impl ClientConn {
             attached: None,
             size: (80, 24),
             mode: Mode::Running,
+            select: SelectState::default(),
             needs_redraw: false,
             closing: false,
             dead: false,
@@ -525,11 +528,27 @@ fn handle_frame(
             let size = clients[ci].size;
             // Take the mode out so `clients` stays free for kick handling.
             let mut mode = std::mem::take(&mut clients[ci].mode);
+            let mut select = std::mem::take(&mut clients[ci].select);
             let overlay_involved = !matches!(mode, Mode::Running);
-            let detach = handle_input(&payload, &mut mode, sessions, &mut active, content_size(size), config)?;
+            let (detach, copied) = handle_input(
+                &payload,
+                &mut mode,
+                sessions,
+                &mut active,
+                content_size(size),
+                config,
+                &mut select,
+            )?;
             let overlay_involved = overlay_involved || !matches!(mode, Mode::Running);
             clients[ci].mode = mode;
+            clients[ci].select = select;
             clients[ci].needs_redraw = true;
+
+            // A completed mouse selection: put it on the client's
+            // clipboard via OSC 52 (in-band, so it works over SSH).
+            if let Some(text) = copied {
+                clients[ci].send(S2C_OUTPUT, &osc52(&text));
+            }
 
             if detach {
                 clients[ci].bye("detached");
@@ -698,6 +717,31 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
         // Writing into a Vec cannot fail.
         let _ = write;
     }
+    out
+}
+
+/// Wrap text in an OSC 52 clipboard-set sequence (base64 payload). The
+/// client's terminal — however many SSH hops away — sets its clipboard.
+fn osc52(text: &str) -> Vec<u8> {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    // Terminals cap OSC payload sizes; clamp to something generous.
+    let data = text.as_bytes();
+    let data = &data[..data.len().min(512 * 1024)];
+    let mut out = b"\x1b]52;c;".to_vec();
+    for chunk in data.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63]);
+        out.push(TABLE[(n >> 12) as usize & 63]);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] } else { b'=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] } else { b'=' });
+    }
+    out.push(0x07);
     out
 }
 

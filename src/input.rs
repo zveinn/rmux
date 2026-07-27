@@ -3,7 +3,7 @@
 
 use crate::Result;
 use crate::config::{Binding, BindingAction, Config, Pin};
-use crate::model::{NavDir, Session};
+use crate::model::{NavDir, Rect, Session};
 use crate::pty::Pty;
 
 /// Which manager overlay is on screen (or being named for).
@@ -157,20 +157,25 @@ pub fn forward_input(pty: &Pty, bindings: &[Binding], buf: &[u8]) -> Option<(Inp
     None
 }
 
-/// A scroll intent extracted from raw client input.
-pub enum ScrollEvent {
-    /// Mouse wheel; `raw` keeps the original SGR bytes so panes that
-    /// track the mouse themselves get the event untouched.
+/// A mouse/scroll intent extracted from raw client input. `raw` keeps
+/// the original SGR bytes so panes that track the mouse themselves get
+/// the event untouched.
+pub enum MouseEvent {
     Wheel { up: bool, raw: Vec<u8> },
     /// PageUp / PageDown.
     Page { up: bool },
+    /// Button press; 1-based screen coordinates.
+    Press { left: bool, x: u16, y: u16, raw: Vec<u8> },
+    /// Motion with the left button held.
+    Drag { x: u16, y: u16, raw: Vec<u8> },
+    /// Button release.
+    Release { x: u16, y: u16, raw: Vec<u8> },
 }
 
-/// Split raw input into (bytes to process normally, scroll events).
-/// SGR mouse sequences are always consumed here — wheel becomes an
-/// event, other mouse events are dropped so they never leak into a
-/// shell as garbage bytes. PageUp/PageDown become events too.
-pub fn extract_scroll(buf: &[u8]) -> (Vec<u8>, Vec<ScrollEvent>) {
+/// Split raw input into (bytes to process normally, mouse events).
+/// SGR mouse sequences are always consumed here so they never leak
+/// into a shell as garbage bytes. PageUp/PageDown become events too.
+pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
     let mut clean = Vec::with_capacity(buf.len());
     let mut events = Vec::new();
     let mut i = 0;
@@ -182,16 +187,35 @@ pub fn extract_scroll(buf: &[u8]) -> (Vec<u8>, Vec<ScrollEvent>) {
                 j += 1;
             }
             if j < buf.len() && (buf[j] == b'M' || buf[j] == b'm') {
-                let cb: u32 = std::str::from_utf8(&buf[i + 3..j])
-                    .ok()
-                    .and_then(|s| s.split(';').next()?.parse().ok())
-                    .unwrap_or(0);
-                // Wheel: bit 6 set, low two bits 0 (up) or 1 (down);
-                // modifier bits may also be set.
-                if buf[j] == b'M' && cb & 64 != 0 && cb & 2 == 0 {
-                    events.push(ScrollEvent::Wheel {
-                        up: cb & 1 == 0,
-                        raw: buf[i..=j].to_vec(),
+                let mut params = std::str::from_utf8(&buf[i + 3..j])
+                    .unwrap_or("")
+                    .split(';')
+                    .map(|p| p.parse::<u32>().unwrap_or(0));
+                let cb = params.next().unwrap_or(0);
+                let x = params.next().unwrap_or(1).clamp(1, u32::from(u16::MAX)) as u16;
+                let y = params.next().unwrap_or(1).clamp(1, u32::from(u16::MAX)) as u16;
+                let raw = buf[i..=j].to_vec();
+                if cb & 64 != 0 {
+                    // Wheel: low two bits 0 (up) or 1 (down); modifier
+                    // bits may also be set. Wheel left/right dropped.
+                    if buf[j] == b'M' && cb & 2 == 0 {
+                        events.push(MouseEvent::Wheel {
+                            up: cb & 1 == 0,
+                            raw,
+                        });
+                    }
+                } else if buf[j] == b'm' {
+                    events.push(MouseEvent::Release { x, y, raw });
+                } else if cb & 32 != 0 {
+                    if cb & 3 == 0 {
+                        events.push(MouseEvent::Drag { x, y, raw });
+                    }
+                } else {
+                    events.push(MouseEvent::Press {
+                        left: cb & 3 == 0,
+                        x,
+                        y,
+                        raw,
                     });
                 }
                 i = j + 1;
@@ -204,7 +228,7 @@ pub fn extract_scroll(buf: &[u8]) -> (Vec<u8>, Vec<ScrollEvent>) {
             }
         }
         if buf[i..].starts_with(b"\x1b[5~") || buf[i..].starts_with(b"\x1b[6~") {
-            events.push(ScrollEvent::Page {
+            events.push(MouseEvent::Page {
                 up: buf[i + 2] == b'5',
             });
             i += 4;
@@ -219,7 +243,7 @@ pub fn extract_scroll(buf: &[u8]) -> (Vec<u8>, Vec<ScrollEvent>) {
 /// Apply scroll events to the focused pane: panes tracking the mouse
 /// get the raw wheel bytes, alt-screen apps get arrow/page keys (like
 /// most terminal emulators), everything else scrolls our scrollback.
-fn apply_scroll(events: &[ScrollEvent], sessions: &mut [Session], active: usize) {
+fn apply_scroll(event: &MouseEvent, sessions: &mut [Session], active: usize) {
     use libghostty_vt::screen::Screen;
     use libghostty_vt::terminal::{Mode as TermMode, ScrollViewport};
 
@@ -229,36 +253,353 @@ fn apply_scroll(events: &[ScrollEvent], sessions: &mut [Session], active: usize)
     let Some(pane) = tab.layout.pane_mut(focused) else {
         return;
     };
-    for event in events {
-        let tracking = pane.term.is_mouse_tracking().unwrap_or(false);
-        let alt = matches!(pane.term.active_screen(), Ok(Screen::Alternate));
-        match event {
-            ScrollEvent::Wheel { up, raw } => {
-                if tracking {
-                    pane.pty.write(raw);
-                } else if alt {
-                    let key: &[u8] = match (pane.term.mode(TermMode::DECCKM), up) {
-                        (Ok(true), true) => b"\x1bOA",
-                        (Ok(true), false) => b"\x1bOB",
-                        (_, true) => b"\x1b[A",
-                        (_, false) => b"\x1b[B",
+    let tracking = pane.term.is_mouse_tracking().unwrap_or(false);
+    let alt = matches!(pane.term.active_screen(), Ok(Screen::Alternate));
+    match event {
+        MouseEvent::Wheel { up, raw } => {
+            if tracking {
+                pane.pty.write(raw);
+            } else if alt {
+                let key: &[u8] = match (pane.term.mode(TermMode::DECCKM), up) {
+                    (Ok(true), true) => b"\x1bOA",
+                    (Ok(true), false) => b"\x1bOB",
+                    (_, true) => b"\x1b[A",
+                    (_, false) => b"\x1b[B",
+                };
+                for _ in 0..3 {
+                    pane.pty.write(key);
+                }
+            } else {
+                let delta = if *up { -3 } else { 3 };
+                pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+            }
+        }
+        MouseEvent::Page { up } => {
+            if alt || tracking {
+                pane.pty.write(if *up { b"\x1b[5~" } else { b"\x1b[6~" });
+            } else {
+                let page = pane.term.rows().unwrap_or(24).saturating_sub(2) as isize;
+                let delta = if *up { -page } else { page };
+                pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Per-client mouse-selection state (`select_copy`).
+pub struct SelectState {
+    /// The gesture and the pane it is anchored in.
+    gesture: Option<(u64, libghostty_vt::selection::gesture::Gesture<'static>)>,
+    /// Pane holding an installed (visible) selection.
+    selected_pane: Option<u64>,
+    /// Pane-local cell the gesture was anchored at.
+    anchor: Option<(u16, u16)>,
+    /// Whether the current drag runs backward (before the anchor).
+    backward: bool,
+    /// Monotonic base for click timestamps (double-click detection).
+    epoch: std::time::Instant,
+}
+
+impl Default for SelectState {
+    fn default() -> Self {
+        Self {
+            gesture: None,
+            selected_pane: None,
+            anchor: None,
+            backward: false,
+            epoch: std::time::Instant::now(),
+        }
+    }
+}
+
+/// Clear the visible selection (if any) and forget the gesture.
+fn clear_selection(select: &mut SelectState, sessions: &mut [Session]) {
+    select.gesture = None;
+    let Some(pid) = select.selected_pane.take() else {
+        return;
+    };
+    for session in sessions.iter_mut() {
+        for tab in &mut session.tabs {
+            if let Some(pane) = tab.layout.pane(pid) {
+                let _ = pane.term.set_selection(None);
+                return;
+            }
+        }
+    }
+}
+
+/// Handle press/drag/release for mouse select-to-copy. Returns text to
+/// copy to the client's clipboard when a selection completes.
+fn apply_select(
+    event: &MouseEvent,
+    select: &mut SelectState,
+    sessions: &mut [Session],
+    active: usize,
+    size: (u16, u16),
+    enabled: bool,
+) -> Option<String> {
+    use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
+    use libghostty_vt::selection::FormatOptions;
+    use libghostty_vt::terminal::{Point, PointCoordinate};
+    use std::time::Duration;
+
+    let (x, y, raw, kind) = match event {
+        MouseEvent::Press { left, x, y, raw } => (*x, *y, raw, if *left { 0 } else { 3 }),
+        MouseEvent::Drag { x, y, raw } => (*x, *y, raw, 1),
+        MouseEvent::Release { x, y, raw } => (*x, *y, raw, 2),
+        _ => return None,
+    };
+    // 1-based screen coords -> 0-based content coords.
+    let (px, py) = (x.saturating_sub(1), y.saturating_sub(1));
+
+    // Pane rectangles of the visible tab.
+    let session = &mut sessions[active];
+    let tab = &mut session.tabs[session.active_tab];
+    let full = Rect {
+        x: 0,
+        y: 0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut rects: Vec<(u64, Rect)> = Vec::new();
+    if tab.zoomed {
+        rects.push((tab.focused, full));
+    } else {
+        let _ = tab.layout.for_each(full, &mut |pane, rect| {
+            rects.push((pane.id, rect));
+            Ok(())
+        });
+    }
+
+    // Drags/releases stick to the gesture's pane; presses hit-test.
+    let target = match kind {
+        1 | 2 => select.gesture.as_ref().map(|(pid, _)| *pid).or_else(|| {
+            rects
+                .iter()
+                .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+                .map(|(id, _)| *id)
+        }),
+        _ => rects
+            .iter()
+            .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+            .map(|(id, _)| *id),
+    };
+    let (pane_id, rect) = match target.and_then(|id| {
+        rects
+            .iter()
+            .find(|(pid, _)| *pid == id)
+            .map(|(pid, r)| (*pid, *r))
+    }) {
+        Some(v) => v,
+        None => return None, // divider or tab bar
+    };
+
+    // Panes that track the mouse get the raw event; no rmux selection.
+    let tracking = tab
+        .layout
+        .pane(pane_id)
+        .is_some_and(|p| p.term.is_mouse_tracking().unwrap_or(false));
+    if tracking {
+        if let Some(pane) = tab.layout.pane(pane_id) {
+            pane.pty.write(raw);
+        }
+        return None;
+    }
+
+    // Pane-local cell coordinates, clamped into the pane.
+    let lx = px.clamp(rect.x, rect.x + rect.w.saturating_sub(1)) - rect.x;
+    let ly = py.clamp(rect.y, rect.y + rect.h.saturating_sub(1)) - rect.y;
+
+    match kind {
+        // Press: click-to-focus, then anchor a selection gesture.
+        0 | 3 => {
+            clear_only_selection(select, sessions);
+            let session = &mut sessions[active];
+            let tab = &mut session.tabs[session.active_tab];
+            tab.focused = pane_id;
+            if kind == 3 || !enabled {
+                return None; // middle/right click: focus only
+            }
+            // Reuse the gesture on the same pane so double/triple
+            // clicks (word/line select) chain up.
+            let keep = matches!(&select.gesture, Some((pid, _)) if *pid == pane_id);
+            if !keep {
+                select.gesture = Gesture::new().ok().map(|g| (pane_id, g));
+            }
+            let Some((_, gesture)) = &mut select.gesture else {
+                return None;
+            };
+            let Some(pane) = tab.layout.pane(pane_id) else {
+                return None;
+            };
+            let result = (|| -> crate::Result<Option<()>> {
+                let grid_ref = pane.term.grid_ref(Point::Viewport(PointCoordinate {
+                    x: lx,
+                    y: u32::from(ly),
+                }))?;
+                let mut press = PressEvent::new()?;
+                press
+                    .set_time(select.epoch.elapsed())?
+                    .set_repeat_interval(Duration::from_millis(400))?
+                    .set_repeat_distance(8.0)?
+                    .set_position(
+                        // Left-of-cell boundary: the anchor cell is
+                        // included when dragging forward (re-anchored
+                        // right-of-cell when a drag turns backward).
+                        (f64::from(lx) + 0.25) * f64::from(crate::model::CELL_PX.0),
+                        (f64::from(ly) + 0.5) * f64::from(crate::model::CELL_PX.1),
+                    )?;
+                if let Some(selection) = press.apply(gesture, &pane.term, grid_ref)? {
+                    pane.term.set_selection(Some(&selection))?;
+                    return Ok(Some(()));
+                }
+                pane.term.set_selection(None)?;
+                Ok(None)
+            })();
+            if matches!(result, Ok(Some(()))) {
+                select.selected_pane = Some(pane_id);
+            }
+            select.anchor = Some((lx, ly));
+            select.backward = false;
+            None
+        }
+        // Drag: extend the selection.
+        1 => {
+            if !enabled {
+                return None;
+            }
+            let Some((gpid, _)) = &select.gesture else {
+                return None;
+            };
+            if *gpid != pane_id {
+                return None;
+            }
+            let (ax, ay) = select.anchor?;
+            // Endpoint boundaries sit on the biased side of the cell:
+            // the leftmost end needs a left bias, the rightmost a right
+            // bias. The anchor's side is fixed at press time, so when a
+            // drag crosses to the other side of the anchor, re-anchor
+            // with a fresh (untimed) press biased the other way.
+            let backward = (ly, lx) < (ay, ax);
+            if backward != select.backward {
+                select.backward = backward;
+                let rebuilt = (|| -> crate::Result<()> {
+                    let session = &sessions[active];
+                    let tab = &session.tabs[session.active_tab];
+                    let Some(pane) = tab.layout.pane(pane_id) else {
+                        return Err("pane gone".into());
                     };
-                    for _ in 0..3 {
-                        pane.pty.write(key);
-                    }
-                } else {
-                    let delta = if *up { -3 } else { 3 };
-                    pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+                    let mut gesture = Gesture::new()?;
+                    let grid_ref = pane.term.grid_ref(Point::Viewport(PointCoordinate {
+                        x: ax,
+                        y: u32::from(ay),
+                    }))?;
+                    let bias = if backward { 0.75 } else { 0.25 };
+                    let mut press = PressEvent::new()?;
+                    press.set_position(
+                        (f64::from(ax) + bias) * f64::from(crate::model::CELL_PX.0),
+                        (f64::from(ay) + 0.5) * f64::from(crate::model::CELL_PX.1),
+                    )?;
+                    let _ = press.apply(&mut gesture, &pane.term, grid_ref)?;
+                    select.gesture = Some((pane_id, gesture));
+                    Ok(())
+                })();
+                if rebuilt.is_err() {
+                    return None;
                 }
             }
-            ScrollEvent::Page { up } => {
-                if alt || tracking {
-                    pane.pty.write(if *up { b"\x1b[5~" } else { b"\x1b[6~" });
-                } else {
-                    let page = pane.term.rows().unwrap_or(24).saturating_sub(2) as isize;
-                    let delta = if *up { -page } else { page };
-                    pane.term.scroll_viewport(ScrollViewport::Delta(delta));
+            let Some((_, gesture)) = &mut select.gesture else {
+                return None;
+            };
+            let session = &sessions[active];
+            let tab = &session.tabs[session.active_tab];
+            let Some(pane) = tab.layout.pane(pane_id) else {
+                return None;
+            };
+            let pointer_bias = if backward { 0.25 } else { 0.75 };
+            let result = (|| -> crate::Result<Option<()>> {
+                let grid_ref = pane.term.grid_ref(Point::Viewport(PointCoordinate {
+                    x: lx,
+                    y: u32::from(ly),
+                }))?;
+                let mut drag = DragEvent::new()?;
+                drag.set_position(
+                    (f64::from(lx) + pointer_bias) * f64::from(crate::model::CELL_PX.0),
+                    (f64::from(ly) + 0.5) * f64::from(crate::model::CELL_PX.1),
+                )?;
+                let geometry = libghostty_vt::selection::gesture::Geometry {
+                    columns: u32::from(rect.w.max(1)),
+                    cell_width: crate::model::CELL_PX.0,
+                    padding_left: 0,
+                    screen_height: u32::from(rect.h.max(1)) * crate::model::CELL_PX.1,
+                };
+                if let Some(selection) = drag.apply(gesture, &pane.term, grid_ref, geometry)? {
+                    pane.term.set_selection(Some(&selection))?;
+                    return Ok(Some(()));
                 }
+                Ok(None)
+            })();
+            if matches!(result, Ok(Some(()))) {
+                select.selected_pane = Some(pane_id);
+            }
+            None
+        }
+        // Release: finish the gesture; copy when something is selected.
+        _ => {
+            if !enabled {
+                return None;
+            }
+            let Some((gpid, gesture)) = &mut select.gesture else {
+                return None;
+            };
+            if *gpid != pane_id {
+                return None;
+            }
+            let session = &sessions[active];
+            let tab = &session.tabs[session.active_tab];
+            let Some(pane) = tab.layout.pane(pane_id) else {
+                return None;
+            };
+            (|| -> crate::Result<Option<String>> {
+                let grid_ref = pane.term.grid_ref(Point::Viewport(PointCoordinate {
+                    x: lx,
+                    y: u32::from(ly),
+                }))?;
+                let mut release = ReleaseEvent::new()?;
+                release.apply(gesture, &pane.term, Some(grid_ref))?;
+                // Copy on drag or multi-click (word/line); a bare click
+                // just moves focus.
+                let meaningful = gesture.dragged(&pane.term).unwrap_or(false)
+                    || gesture.click_count(&pane.term).unwrap_or(0) >= 2;
+                if !meaningful {
+                    return Ok(None);
+                }
+                let options = FormatOptions::new().with_unwrap(true).with_trim(true);
+                let text = pane
+                    .term
+                    .format_selection_alloc(None, options)?
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .filter(|t| !t.is_empty());
+                Ok(text)
+            })()
+            .ok()
+            .flatten()
+        }
+    }
+}
+
+/// Clear the visible selection but keep the gesture (used on a fresh
+/// press, where the gesture must survive for double-click chaining).
+fn clear_only_selection(select: &mut SelectState, sessions: &mut [Session]) {
+    let Some(pid) = select.selected_pane.take() else {
+        return;
+    };
+    for session in sessions.iter_mut() {
+        for tab in &mut session.tabs {
+            if let Some(pane) = tab.layout.pane(pid) {
+                let _ = pane.term.set_selection(None);
+                return;
             }
         }
     }
@@ -512,19 +853,41 @@ pub fn handle_input(
     active: &mut usize,
     size: (u16, u16),
     config: &Config,
-) -> Result<bool> {
+    select: &mut SelectState,
+) -> Result<(bool, Option<String>)> {
     use crate::model::SplitDir;
     let bindings: &[Binding] = &config.bindings;
 
-    // Pull mouse-wheel / PageUp / PageDown out of the stream first.
-    let (clean, scroll) = extract_scroll(buf);
+    // Pull mouse and PageUp/PageDown events out of the stream first.
+    let (clean, mouse) = extract_mouse(buf);
     let mut synthetic: Vec<u8> = Vec::new();
+    let mut copied: Option<String> = None;
     match mode {
         Mode::Running => {
-            apply_scroll(&scroll, sessions, *active);
+            for event in &mouse {
+                match event {
+                    MouseEvent::Wheel { .. } | MouseEvent::Page { .. } => {
+                        apply_scroll(event, sessions, *active);
+                    }
+                    _ => {
+                        if let Some(text) = apply_select(
+                            event,
+                            select,
+                            sessions,
+                            *active,
+                            size,
+                            config.select_copy,
+                        ) {
+                            copied = Some(text);
+                        }
+                    }
+                }
+            }
             if !clean.is_empty() {
-                // Typing snaps the view back to the live bottom.
+                // Typing snaps the view back to the live bottom and
+                // drops any visible selection.
                 use libghostty_vt::terminal::ScrollViewport;
+                clear_selection(select, sessions);
                 let session = &mut sessions[*active];
                 let tab = &mut session.tabs[session.active_tab];
                 let focused = tab.focused;
@@ -535,11 +898,16 @@ pub fn handle_input(
         }
         // In a manager, wheel/page move the selection.
         Mode::Manager { .. } => {
-            for event in &scroll {
-                synthetic.push(match event {
-                    ScrollEvent::Wheel { up: true, .. } | ScrollEvent::Page { up: true } => b'k',
-                    _ => b'j',
-                });
+            for event in &mouse {
+                match event {
+                    MouseEvent::Wheel { up: true, .. } | MouseEvent::Page { up: true } => {
+                        synthetic.push(b'k');
+                    }
+                    MouseEvent::Wheel { up: false, .. } | MouseEvent::Page { up: false } => {
+                        synthetic.push(b'j');
+                    }
+                    _ => {}
+                }
             }
         }
         Mode::Naming { .. } => {}
@@ -566,7 +934,7 @@ pub fn handle_input(
                 };
                 buf = &buf[rest..];
                 match action {
-                    InputAction::Detach => return Ok(true),
+                    InputAction::Detach => return Ok((true, copied)),
                     InputAction::OpenSession(pi) => {
                         if let Some(pin) = config.pins.get(pi) {
                             *active = match sessions.iter().position(|s| s.name == pin.name) {
@@ -744,5 +1112,5 @@ pub fn handle_input(
             break;
         }
     }
-    Ok(false)
+    Ok((false, copied))
 }

@@ -541,6 +541,10 @@ impl<'alloc> Renderer<'alloc> {
                     // swapped in SGR, and the host does it correctly.
                     next.reverse = style.inverse;
                 }
+                // Mouse selection highlight.
+                if cell.is_selected()? {
+                    next.reverse = !next.reverse;
+                }
 
                 Self::apply_pen(out, &mut pen, next)?;
 

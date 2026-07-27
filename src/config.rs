@@ -73,6 +73,9 @@ pub struct Config {
     /// Lines of scrollback kept per pane (`scrollback_lines: 5000`).
     /// Applies to shells spawned after a change.
     pub scrollback_lines: usize,
+    /// Mouse select-to-copy (`select_copy: true`): drag selects text in
+    /// a pane, releasing copies it to the client's clipboard via OSC 52.
+    pub select_copy: bool,
 }
 
 /// The server's controls: config name, default key, action.
@@ -115,6 +118,8 @@ struct RawConfig {
     start_dir: Option<String>,
     #[serde(default)]
     scrollback_lines: Option<usize>,
+    #[serde(default)]
+    select_copy: Option<bool>,
 }
 
 pub fn load() -> Result<Config, String> {
@@ -141,6 +146,7 @@ pub fn load() -> Result<Config, String> {
             shell: None,
             start_dir: None,
             scrollback_lines: None,
+            select_copy: None,
         },
     };
 
@@ -285,6 +291,7 @@ pub fn load() -> Result<Config, String> {
         shell,
         start_dir,
         scrollback_lines,
+        select_copy: raw.select_copy.unwrap_or(true),
     })
 }
 
