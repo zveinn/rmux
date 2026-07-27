@@ -15,7 +15,7 @@ use libghostty_vt::{
     Terminal,
     render::{CellIterator, Dirty, RenderState, RowIterator},
     screen::CellWide,
-    style::{RgbColor, Underline},
+    style::{RgbColor, StyleColor, Underline},
 };
 
 use std::collections::HashMap;
@@ -454,6 +454,20 @@ struct Pen {
     bold: bool,
     italic: bool,
     underline: bool,
+    reverse: bool,
+}
+
+/// Map a cell's color to what we emit: palette indices and unset
+/// (default) colors pass through untouched, so the *host* terminal's
+/// theme decides what they look like — only genuine truecolor cells
+/// are sent as RGB. This is why rmux panes match the colors of the
+/// terminal they run in.
+fn style_color(c: StyleColor, default: Color) -> Color {
+    match c {
+        StyleColor::None => default,
+        StyleColor::Palette(idx) => Color::AnsiValue(idx.0),
+        StyleColor::Rgb(rgb) => color(rgb),
+    }
 }
 
 impl<'alloc> Renderer<'alloc> {
@@ -477,14 +491,16 @@ impl<'alloc> Renderer<'alloc> {
     ) -> Result<Option<(u16, u16)>> {
         // Snapshot the terminal state; everything below reads the snapshot.
         let snapshot = self.render_state.update(term)?;
-        let colors = snapshot.colors()?;
 
+        // Pane defaults: the host terminal's own defaults (SGR 39/49),
+        // unless a program inside the pane overrode them via OSC 10/11.
         let default = Pen {
-            fg: color(colors.foreground),
-            bg: color(colors.background),
+            fg: term.fg_color()?.map_or(Color::Reset, color),
+            bg: term.bg_color()?.map_or(Color::Reset, color),
             bold: false,
             italic: false,
             underline: false,
+            reverse: false,
         };
         let mut pen = default;
 
@@ -512,20 +528,18 @@ impl<'alloc> Renderer<'alloc> {
                     CellWide::Narrow | CellWide::Wide => {}
                 }
 
-                let mut next = Pen {
-                    fg: cell.fg_color()?.map_or(default.fg, color),
-                    bg: cell.bg_color()?.map_or(default.bg, color),
-                    ..default
-                };
-
+                let mut next = default;
                 if cell.has_styling()? {
                     let style = cell.style()?;
+                    next.fg = style_color(style.fg_color, default.fg);
+                    next.bg = style_color(style.bg_color, default.bg);
                     next.bold = style.bold;
                     next.italic = style.italic;
                     next.underline = style.underline != Underline::None;
-                    if style.inverse {
-                        std::mem::swap(&mut next.fg, &mut next.bg);
-                    }
+                    // Pass inverse through as an attribute instead of
+                    // swapping colors ourselves: default fg/bg can't be
+                    // swapped in SGR, and the host does it correctly.
+                    next.reverse = style.inverse;
                 }
 
                 Self::apply_pen(out, &mut pen, next)?;
@@ -563,8 +577,8 @@ impl<'alloc> Renderer<'alloc> {
 
         // Attributes can only be cleared by a full reset, which also
         // clears colors, so re-emit everything in that case.
-        let attrs_changed = (pen.bold, pen.italic, pen.underline)
-            != (next.bold, next.italic, next.underline);
+        let attrs_changed = (pen.bold, pen.italic, pen.underline, pen.reverse)
+            != (next.bold, next.italic, next.underline, next.reverse);
 
         if attrs_changed {
             queue!(out, SetAttribute(Attribute::Reset))?;
@@ -576,6 +590,9 @@ impl<'alloc> Renderer<'alloc> {
             }
             if next.underline {
                 queue!(out, SetAttribute(Attribute::Underlined))?;
+            }
+            if next.reverse {
+                queue!(out, SetAttribute(Attribute::Reverse))?;
             }
         }
         if attrs_changed || pen.fg != next.fg {
