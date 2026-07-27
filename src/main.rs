@@ -24,6 +24,7 @@ mod protocol;
 mod pty;
 mod render;
 mod server;
+mod state;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 

@@ -259,8 +259,13 @@ pub struct Session {
 
 impl Pane {
     pub fn new(size: (u16, u16), config: &Config) -> Result<Self> {
+        Self::new_in(size, config, None)
+    }
+
+    /// Like `new`, with the shell started in `cwd` (state restore).
+    pub fn new_in(size: (u16, u16), config: &Config, cwd: Option<&str>) -> Result<Self> {
         let (cols, rows) = size;
-        let pty = Rc::new(Pty::spawn(winsize(cols, rows), config)?);
+        let pty = Rc::new(Pty::spawn(winsize(cols, rows), config, cwd)?);
 
         let mut term = Terminal::new(TerminalOptions {
             cols,
@@ -523,6 +528,19 @@ impl Session {
             last_activity: std::time::Instant::now(),
             last_size: size,
         })
+    }
+
+    /// Rebuild a session from saved state (tabs already constructed).
+    pub fn restore(name: String, tabs: Vec<Tab>, active_tab: usize, size: (u16, u16)) -> Self {
+        Self {
+            id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            name,
+            active_tab: active_tab.min(tabs.len().saturating_sub(1)),
+            tabs,
+            agent: false,
+            last_activity: std::time::Instant::now(),
+            last_size: size,
+        }
     }
 
     pub fn resize(&mut self, size: (u16, u16)) -> Result<()> {

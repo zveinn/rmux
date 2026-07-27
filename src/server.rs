@@ -155,12 +155,16 @@ pub fn run() -> Result<()> {
     }
     let listener = bind_listener()?;
     let mut renderer = Renderer::new()?;
-    let mut sessions: Vec<Session> = Vec::new();
+    // Bring back the sessions (tabs, splits, shell cwds) saved on the
+    // last run; agent sessions are not part of saved state.
+    let mut sessions: Vec<Session> = crate::state::restore(&config);
+    resort_sessions(&mut sessions, &config);
     let mut clients: Vec<ClientConn> = Vec::new();
 
     eprintln!("rmux server listening on {}", socket_path().display());
 
     let mut last_mtime = config_mtime();
+    let mut last_save = std::time::Instant::now();
     let mut tick: u32 = 0;
 
     loop {
@@ -187,6 +191,12 @@ pub fn run() -> Result<()> {
                     Err(e) => eprintln!("config reload failed (keeping old config): {e}"),
                 }
             }
+        }
+
+        // ---- Persist the session layout every ten seconds. ----
+        if last_save.elapsed().as_secs() >= 10 {
+            last_save = std::time::Instant::now();
+            crate::state::save(&sessions);
         }
 
         // ---- Poll: listener + client sockets + every pane's pty. ----

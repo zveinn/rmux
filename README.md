@@ -121,6 +121,7 @@ swallowed by rmux and never reach the inner shell.
 | Start directory | `start_dir:` in the config | Where new shells start; unset = your home directory |
 | Hot reload | edit `config.yaml` | Accent, keys, pins apply live; `shell`/`start_dir`/`terminal_envs` to new shells |
 | Detach | `ctrl+g` | The session keeps running; reattach with `rmux a` |
+| State restore | automatic | Sessions, tabs, splits, and each shell's directory are saved to `~/.config/rmux/layout.json` every 10s and recreated when the server starts (fresh shells in the saved dirs; agent sessions excluded) |
 | Agent mode | `rmux agent new/send/read/rename/kill` | Sandboxed to agent-created sessions; bumps activity ordering |
 | Listing | `rmux list` | Colored on a tty, plain when piped (agents parse this) |
 
