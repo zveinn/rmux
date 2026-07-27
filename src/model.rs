@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use libghostty_vt::{
     Terminal, TerminalOptions,
     terminal::{
-        ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
-        PrimaryDeviceAttributes, SecondaryDeviceAttributes, SizeReportSize,
+        ClipboardLocation, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes,
+        DeviceType, PrimaryDeviceAttributes, SecondaryDeviceAttributes, SizeReportSize,
     },
 };
 
@@ -49,6 +49,10 @@ pub struct Pane {
     pub id: u64,
     pub pty: Rc<Pty>,
     pub term: Terminal<'static, 'static>,
+    /// OSC 52 clipboard writes from programs in this pane, queued as
+    /// (register, text) until the server forwards them to the attached
+    /// client (helix/vim yank-to-clipboard).
+    pub clipboard: Rc<std::cell::RefCell<Vec<(char, String)>>>,
 }
 
 /// How a split divides a pane's rectangle.
@@ -306,10 +310,31 @@ impl Pane {
                 })
             })?;
 
+        // Queue OSC 52 clipboard writes (helix/vim yank) for the server
+        // to forward to the attached client's terminal.
+        let clipboard: Rc<std::cell::RefCell<Vec<(char, String)>>> = Rc::default();
+        let clip = Rc::clone(&clipboard);
+        term.on_clipboard_write(move |_t, write| {
+            let register = match write.location() {
+                ClipboardLocation::Standard => 'c',
+                ClipboardLocation::Selection | ClipboardLocation::Primary => 'p',
+            };
+            let contents: Vec<_> = write.contents().collect();
+            let content = contents
+                .iter()
+                .find(|c| c.mime.starts_with("text/plain"))
+                .or_else(|| contents.first());
+            if let Some(content) = content {
+                clip.borrow_mut().push((register, content.data.to_string()));
+            }
+            Ok(())
+        })?;
+
         Ok(Self {
             id: NEXT_PANE_ID.fetch_add(1, Ordering::Relaxed),
             pty,
             term,
+            clipboard,
         })
     }
 

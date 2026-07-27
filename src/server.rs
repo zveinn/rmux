@@ -291,6 +291,7 @@ pub fn run() -> Result<()> {
         // ---- Drain ptys into their pane terminals. ----
         let mut any_removed = false;
         let mut changed_sessions: Vec<u64> = Vec::new();
+        let mut clipboard_out: Vec<(u64, char, String)> = Vec::new();
         for (k, &(si, ti, pane_id)) in fd_map.iter().enumerate() {
             if !ready[k + 1 + client_count].0 {
                 continue;
@@ -302,6 +303,9 @@ pub fn run() -> Result<()> {
             };
             match pane.pty.read(&mut pane.term) {
                 Ok(()) => {
+                    for (register, text) in pane.clipboard.borrow_mut().drain(..) {
+                        clipboard_out.push((session_id, register, text));
+                    }
                     if ti == sessions[si].active_tab && !changed_sessions.contains(&session_id) {
                         changed_sessions.push(session_id);
                     }
@@ -309,6 +313,17 @@ pub fn run() -> Result<()> {
                 Err(_) => {
                     tab.remove_pane(pane_id);
                     any_removed = true;
+                }
+            }
+        }
+
+        // OSC 52 from programs inside panes: pass each write through to
+        // the client attached to that pane's session (in-band, so the
+        // clipboard lands on the user's local machine even over SSH).
+        for (session_id, register, text) in clipboard_out {
+            for client in clients.iter_mut() {
+                if client.attached == Some(session_id) && !client.closing && !client.dead {
+                    client.send(S2C_OUTPUT, &osc52_to(register, &text));
                 }
             }
         }
@@ -730,12 +745,18 @@ fn format_listing(sessions: &[Session], clients: &[ClientConn], config: &Config)
 /// Wrap text in an OSC 52 clipboard-set sequence (base64 payload). The
 /// client's terminal — however many SSH hops away — sets its clipboard.
 fn osc52(text: &str) -> Vec<u8> {
+    osc52_to('c', text)
+}
+
+/// Like `osc52`, targeting a specific register ('c' clipboard, 'p'
+/// primary).
+fn osc52_to(register: char, text: &str) -> Vec<u8> {
     const TABLE: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     // Terminals cap OSC payload sizes; clamp to something generous.
     let data = text.as_bytes();
     let data = &data[..data.len().min(512 * 1024)];
-    let mut out = b"\x1b]52;c;".to_vec();
+    let mut out = format!("\x1b]52;{register};").into_bytes();
     for chunk in data.chunks(3) {
         let b = [
             chunk[0],
