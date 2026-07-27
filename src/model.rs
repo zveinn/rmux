@@ -394,7 +394,12 @@ impl Tab {
         }
 
         // Spawned at the pre-split size; apply_layout corrects it below.
-        let pane = Pane::new((rect.w, rect.h), config)?;
+        // The new shell starts where the shell it was split from is.
+        let cwd = self
+            .layout
+            .pane(self.focused)
+            .and_then(|pane| pane.pty.cwd());
+        let pane = Pane::new_in((rect.w, rect.h), config, cwd.as_deref())?;
         let new_id = pane.id;
         let mut new = Some(pane);
         if self.layout.split_leaf(self.focused, dir, &mut new) {
