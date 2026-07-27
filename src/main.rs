@@ -27,17 +27,14 @@ mod server;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-fn main() -> Result<()> {
+fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let result = match args.first().map(String::as_str) {
         Some("server") => server::run(),
-        Some("a" | "attach") => {
-            let name = args
-                .get(1)
-                .map(String::as_str)
-                .ok_or("usage: rmux a[ttach] <session-name>")?;
-            client::run(name)
-        }
+        Some("a" | "attach") => match args.get(1) {
+            Some(name) => client::run(name),
+            None => Err("usage: rmux a[ttach] <session-name>".into()),
+        },
         Some("list" | "ls") => client::list(),
         Some("agent") => agent::run(&args[1..]),
         _ => {
@@ -47,5 +44,11 @@ fn main() -> Result<()> {
             );
             std::process::exit(2);
         }
+    };
+    // One clean line on stderr (journalctl shows it) instead of Rust's
+    // escaped Debug formatting.
+    if let Err(e) = result {
+        eprintln!("rmux: {e}");
+        std::process::exit(1);
     }
 }

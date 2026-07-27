@@ -65,6 +65,7 @@ impl ClientConn {
     /// Queue a frame; kills the client instead if it is hopelessly slow.
     fn send(&mut self, kind: u8, payload: &[u8]) {
         if self.outbuf.len() + payload.len() > MAX_OUTBUF {
+            eprintln!("dropping unresponsive client (output buffer over {MAX_OUTBUF} bytes)");
             self.dead = true;
             return;
         }
@@ -138,7 +139,12 @@ fn resort_sessions(sessions: &mut [Session], config: &Config) {
 }
 
 pub fn run() -> Result<()> {
-    let mut config: Config = config::load()?;
+    let mut config: Config = config::load().map_err(|e| {
+        format!(
+            "failed to load {} — fix it and restart: {e}",
+            config::path().map_or("config".into(), |p| p.display().to_string())
+        )
+    })?;
     // Auto-reap exited shells (kernel discards their status), so killed
     // sessions/tabs don't leave zombies behind.
     unsafe {
@@ -260,7 +266,8 @@ pub fn run() -> Result<()> {
                         handle_frame(ci, kind, payload, &mut clients, &mut sessions, &config)?
                     }
                     Ok(None) => break,
-                    Err(_) => {
+                    Err(e) => {
+                        eprintln!("dropping client after protocol error: {e}");
                         clients[ci].dead = true;
                         break;
                     }
@@ -548,7 +555,10 @@ fn handle_frame(
             let (result, sessions_changed) = agent::execute(kind, &payload, sessions, config);
             match result {
                 Ok(text) => clients[ci].send(S2C_AGENT_OK, text.as_bytes()),
-                Err(e) => clients[ci].send(S2C_AGENT_ERR, e.as_bytes()),
+                Err(e) => {
+                    eprintln!("agent command failed: {e}");
+                    clients[ci].send(S2C_AGENT_ERR, e.as_bytes());
+                }
             }
             // One-shot request: close once the reply drains.
             clients[ci].closing = true;
@@ -578,7 +588,10 @@ fn handle_frame(
             }
             clients[ci].needs_redraw = true;
         }
-        _ => clients[ci].dead = true,
+        _ => {
+            eprintln!("dropping client after unknown frame kind {kind} (client newer than server?)");
+            clients[ci].dead = true;
+        }
     }
     Ok(())
 }
