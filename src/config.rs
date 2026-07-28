@@ -333,8 +333,21 @@ fn parse_accent(spec: &str) -> Result<Color, String> {
     }
 }
 
-/// Where the config lives (`~/.config/rmux/config.yaml`).
+/// Directory override from `--config <dir>` (config.yaml and
+/// layout.json both live in it).
+static CONFIG_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Set the config directory (from the `--config` flag); first call wins.
+pub fn set_dir(dir: std::path::PathBuf) {
+    let _ = CONFIG_DIR.set(dir);
+}
+
+/// Where the config lives: `<--config dir>/config.yaml` when the flag
+/// was given, else `~/.config/rmux/config.yaml`.
 pub fn path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = CONFIG_DIR.get() {
+        return Some(dir.join("config.yaml"));
+    }
     let home = std::env::var_os("HOME")?;
     Some(std::path::PathBuf::from(home).join(".config/rmux/config.yaml"))
 }

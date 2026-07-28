@@ -29,7 +29,27 @@ mod state;
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    // --config <dir> / --config=<dir>: custom directory for config.yaml
+    // and layout.json. Accepted anywhere in the argument list.
+    let mut i = 0;
+    while i < args.len() {
+        if let Some(dir) = args[i].strip_prefix("--config=").map(str::to_string) {
+            config::set_dir(dir.into());
+            args.remove(i);
+        } else if args[i] == "--config" {
+            if i + 1 >= args.len() {
+                eprintln!("rmux: --config needs a directory");
+                std::process::exit(2);
+            }
+            config::set_dir(args.remove(i + 1).into());
+            args.remove(i);
+        } else {
+            i += 1;
+        }
+    }
+
     let result = match args.first().map(String::as_str) {
         Some("server") => server::run(),
         Some("a" | "attach") => match args.get(1) {
@@ -40,7 +60,7 @@ fn main() {
         Some("agent") => agent::run(&args[1..]),
         _ => {
             eprintln!(
-                "usage: rmux server | rmux a[ttach] <session-name> | rmux list\n\
+                "usage: rmux [--config <dir>] server | rmux a[ttach] <session-name> | rmux list\n\
                         rmux agent new|kill|send|read ...  (rmux agent for details)"
             );
             std::process::exit(2);

@@ -60,7 +60,9 @@ rmux list      # sessions: tabs, panes, attach state, agent ages
 
 Detach with **Ctrl+G** (or drop the SSH connection — the session keeps
 running). The socket lives at `/tmp/rmux-<uid>.sock` (`RMUX_SOCK`
-overrides); server logs land in `journalctl -u rmux`.
+overrides); server logs land in `journalctl -u rmux`. Run the server
+with `--config <dir>` to keep `config.yaml` and `layout.json` in a
+custom directory instead of `~/.config/rmux/`.
 
 ## Config
 
