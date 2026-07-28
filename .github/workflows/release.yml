@@ -9,8 +9,18 @@ permissions:
 
 jobs:
   release:
-    name: build linux x86_64
-    runs-on: ubuntu-latest
+    name: build linux ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          # Native runners on both architectures: libghostty-vt-sys
+          # compiles Ghostty with zig for the host, so cross-compiling
+          # is more trouble than a second runner.
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -30,11 +40,11 @@ jobs:
       - name: Package
         run: |
           strip target/release/rmux
-          mkdir -p dist/rmux-${GITHUB_REF_NAME}-x86_64-linux
+          mkdir -p dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
           cp target/release/rmux rmux.service default-config.yaml README.md \
-            dist/rmux-${GITHUB_REF_NAME}-x86_64-linux/
-          tar -C dist -czf dist/rmux-${GITHUB_REF_NAME}-x86_64-linux.tar.gz \
-            rmux-${GITHUB_REF_NAME}-x86_64-linux
+            dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux/
+          tar -C dist -czf dist/rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux.tar.gz \
+            rmux-${GITHUB_REF_NAME}-${{ matrix.arch }}-linux
 
       - name: Create release
         uses: softprops/action-gh-release@v2

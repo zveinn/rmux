@@ -30,12 +30,13 @@ are normal sessions underneath. A ready-made Claude Code skill ships in
 
 ## Install
 
-Grab the latest Linux build from the
+Grab the latest Linux build for your architecture (`x86_64` or
+`aarch64`) from the
 [releases page](https://github.com/zveinn/rmux/releases) and put `rmux`
 on your PATH:
 
 ```sh
-tar xzf rmux-v*-x86_64-linux.tar.gz && cd rmux-v*-x86_64-linux
+tar xzf rmux-v*-$(uname -m)-linux.tar.gz && cd rmux-v*-$(uname -m)-linux
 sudo install -m755 rmux /usr/local/bin/
 ```
 
