@@ -17,8 +17,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       # libghostty-vt-sys builds libghostty-vt from Ghostty source at
-      # build time and needs zig on PATH; keep in sync with the version
-      # used for local builds.
+      # build time, and Ghostty requires this EXACT zig version (newer
+      # ones are rejected). Only bump together with the libghostty-vt
+      # crate: check what its pinned Ghostty source demands first.
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
