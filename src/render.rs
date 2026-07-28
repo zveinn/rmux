@@ -199,8 +199,59 @@ fn draw_dividers(
         }
         queue!(out, MoveTo(x, y), Print(box_char(bits)))?;
     }
+
+    // Focus arrows: one on every divider bordering the focused pane,
+    // centered on the shared edge and pointing into the pane.
+    if let Some(f) = focused {
+        let sides: [(bool, Option<u16>, u16, u16, char); 4] = [
+            (true, f.x.checked_sub(1), f.y, f.h, '▸'), // left divider
+            (true, Some(f.x + f.w), f.y, f.h, '◂'),    // right divider
+            (false, f.y.checked_sub(1), f.x, f.w, '▾'), // top divider
+            (false, Some(f.y + f.h), f.x, f.w, '▴'),   // bottom divider
+        ];
+        for (vertical, fixed, lo, len, glyph) in sides {
+            let Some(fixed) = fixed else { continue };
+            if let Some((x, y)) = arrow_cell(&cells, vertical, fixed, lo, len) {
+                queue!(out, MoveTo(x, y), Print(glyph))?;
+            }
+        }
+    }
     queue!(out, SetAttribute(Attribute::Reset), SetForegroundColor(Color::Reset))?;
     Ok(())
+}
+
+/// The cell an arrow lands on for one side of the focused pane: the
+/// center of the shared edge along the divider at `fixed`, nudged
+/// sideways when the center is a junction (`┼ ├ ┬ …`), so junctions
+/// stay readable. Returns `None` when the side has no plain divider
+/// cell at all (e.g. it is a screen edge).
+fn arrow_cell(
+    cells: &HashMap<(u16, u16), (u8, bool)>,
+    vertical: bool,
+    fixed: u16,
+    lo: u16,
+    len: u16,
+) -> Option<(u16, u16)> {
+    if len == 0 {
+        return None;
+    }
+    let plain = if vertical { B_UP | B_DOWN } else { B_LEFT | B_RIGHT };
+    let pos = |v: u16| if vertical { (fixed, v) } else { (v, fixed) };
+    let center = lo + (len - 1) / 2;
+    // Center first, then nudge outward in both directions.
+    let candidates = std::iter::once(center).chain((1..len).flat_map(|d| {
+        let up = (center + d < lo + len).then_some(center + d);
+        let down = center.checked_sub(d).filter(|v| *v >= lo);
+        [up, down].into_iter().flatten()
+    }));
+    for v in candidates {
+        if let Some(&(bits, real)) = cells.get(&pos(v)) {
+            if real && bits == plain {
+                return Some(pos(v));
+            }
+        }
+    }
+    None
 }
 
 /// Whether a divider cell lies on the one-cell ring around `f` — the

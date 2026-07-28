@@ -124,7 +124,7 @@ swallowed by rmux and never reach the inner shell.
 |---|---|---|
 | Sessions | `rmux a <name>` | Created on first attach; survive disconnects; one client per session (a new attach kicks the old) |
 | Splits | `ctrl+w` stacked · `ctrl+q` side-by-side | Always 50/50; the new shell opens in the directory of the pane it was split from; a pane's sibling takes its space when the shell exits |
-| Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip |
+| Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip. The focused pane's frame is accent-colored with centered `▸◂▴▾` arrows pointing into it |
 | Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
 | Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000); typing snaps back to live. Apps that track the mouse or run full-screen get the events instead |
 | Select to copy | drag · double-click = word · click = focus pane | `select_copy:` (default on). Releasing copies to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes. Panes tracking the mouse (vim, htop) get the mouse instead |
