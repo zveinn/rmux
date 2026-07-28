@@ -43,6 +43,17 @@ impl Pty {
     ) -> std::io::Result<Self> {
         match unsafe { nix::pty::forkpty(&winsize, None)? } {
             ForkptyResult::Child => {
+                // The server ignores SIGCHLD (auto-reaping) and the Rust
+                // runtime ignores SIGPIPE; SIG_IGN survives fork *and*
+                // exec, so without a reset every program in the pane
+                // inherits broken wait()/pipe semantics (exit statuses
+                // get auto-reaped away, pipelines error instead of
+                // terminating). Hand children pristine dispositions.
+                unsafe {
+                    use nix::sys::signal::{SigHandler, Signal, signal};
+                    let _ = signal(Signal::SIGCHLD, SigHandler::SigDfl);
+                    let _ = signal(Signal::SIGPIPE, SigHandler::SigDfl);
+                }
                 // Prefer the configured shell, then $SHELL, then the
                 // passwd entry, then /bin/sh.
                 let shell = match &config.shell {
