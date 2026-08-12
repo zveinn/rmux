@@ -455,8 +455,6 @@ pub struct SelectState {
     anchor: Option<(u16, u16)>,
     /// Whether the current drag runs backward (before the anchor).
     backward: bool,
-    /// Monotonic base for click timestamps (double-click detection).
-    epoch: std::time::Instant,
     /// Encoder for events forwarded to apps that track the mouse; it
     /// keeps motion-dedup state, so it is per-client and long-lived.
     encoder: Option<libghostty_vt::mouse::Encoder<'static>>,
@@ -469,7 +467,6 @@ impl Default for SelectState {
             selected_pane: None,
             anchor: None,
             backward: false,
-            epoch: std::time::Instant::now(),
             encoder: None,
         }
     }
@@ -507,23 +504,18 @@ fn apply_select(
     use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
     use libghostty_vt::selection::FormatOptions;
     use libghostty_vt::terminal::{Point, PointCoordinate};
-    use std::time::Duration;
 
     match kind {
         // Press: click-to-focus, then anchor a selection gesture.
         0 | 3 => {
-            clear_only_selection(select, sessions);
             let session = &mut sessions[active];
             let tab = &mut session.tabs[session.active_tab];
             if kind == 3 || !enabled {
                 return None; // middle/right click: focus only
             }
-            // Reuse the gesture on the same pane so double/triple
-            // clicks (word/line select) chain up.
-            let keep = matches!(&select.gesture, Some((pid, _)) if *pid == pane_id);
-            if !keep {
-                select.gesture = Gesture::new().ok().map(|g| (pane_id, g));
-            }
+            // A press starts a fresh drag; the gesture lives only until
+            // the button comes back up.
+            select.gesture = Gesture::new().ok().map(|g| (pane_id, g));
             let Some((_, gesture)) = &mut select.gesture else {
                 return None;
             };
@@ -536,10 +528,9 @@ fn apply_select(
                     y: u32::from(ly),
                 }))?;
                 let mut press = PressEvent::new()?;
+                // Left untimed on purpose: libghostty then offers only
+                // single-click behaviour, which is all we want.
                 press
-                    .set_time(select.epoch.elapsed())?
-                    .set_repeat_interval(Duration::from_millis(400))?
-                    .set_repeat_distance(8.0)?
                     .set_position(
                         // Left-of-cell boundary: the anchor cell is
                         // included when dragging forward (re-anchored
@@ -658,20 +649,20 @@ fn apply_select(
             let Some(pane) = tab.layout.pane(pane_id) else {
                 return None;
             };
-            (|| -> crate::Result<Option<String>> {
+            let copied = (|| -> crate::Result<Option<String>> {
                 let grid_ref = pane.term.grid_ref(Point::Viewport(PointCoordinate {
                     x: lx,
                     y: u32::from(ly),
                 }))?;
                 let mut release = ReleaseEvent::new()?;
                 release.apply(gesture, &pane.term, Some(grid_ref))?;
-                // Copy on drag or multi-click (word/line); a bare click
-                // just moves focus.
-                let meaningful = gesture.dragged(&pane.term).unwrap_or(false)
-                    || gesture.click_count(&pane.term).unwrap_or(0) >= 2;
-                if !meaningful {
+                // A bare click just moves focus; only a drag copies.
+                let dragged = gesture.dragged(&pane.term).unwrap_or(false);
+                if !dragged {
                     return Ok(None);
                 }
+                // Format from the installed selection *before* it is
+                // dropped below.
                 let options = FormatOptions::new().with_unwrap(true).with_trim(true);
                 let text = pane
                     .term
@@ -681,23 +672,12 @@ fn apply_select(
                 Ok(text)
             })()
             .ok()
-            .flatten()
-        }
-    }
-}
-
-/// Clear the visible selection but keep the gesture (used on a fresh
-/// press, where the gesture must survive for double-click chaining).
-fn clear_only_selection(select: &mut SelectState, sessions: &mut [Session]) {
-    let Some(pid) = select.selected_pane.take() else {
-        return;
-    };
-    for session in sessions.iter_mut() {
-        for tab in &mut session.tabs {
-            if let Some(pane) = tab.layout.pane(pid) {
-                let _ = pane.term.set_selection(None);
-                return;
-            }
+            .flatten();
+            // The drag is over: the text is on the clipboard, so the
+            // highlight has done its job and the gesture must not
+            // outlive it (a stale one would capture later drags).
+            clear_selection(select, sessions);
+            copied
         }
     }
 }
@@ -1143,6 +1123,15 @@ pub fn handle_input(
                     let session = &mut sessions[*active];
                     let tab = &mut session.tabs[session.active_tab];
                     tab.focused = pane_id;
+                }
+
+                // Any press ends the previous selection, wherever it
+                // was — including presses that go on to an app which
+                // takes the mouse, which never reach the selection code
+                // below. Dropping the gesture with it is what keeps a
+                // finished selection from capturing later drags.
+                if matches!(kind, 0 | 3) {
+                    clear_selection(select, sessions);
                 }
 
                 let session = &mut sessions[*active];
