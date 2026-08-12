@@ -136,6 +136,7 @@ swallowed by rmux and never reach the inner shell.
 | App clipboard | automatic | OSC 52 yanks from programs inside panes (helix `space+y`, vim) are forwarded to your local clipboard, clipboard/primary register preserved |
 | Theme-native colors | automatic | Palette-indexed colors and default fg/bg pass through to your terminal, so panes follow its theme; truecolor is preserved exactly |
 | Session manager | `ctrl+o` | `j/k` move · `enter` switch · `n` new · `r` rename · `x` kill · `/` search · `esc` close |
+| Text prompts | search, name, and settings fields | Full line editing: `←`/`→` move the caret, `Home`/`End`, `Delete`, `Backspace`, `ctrl+a`/`ctrl+e`/`ctrl+u`/`ctrl+w`; long text scrolls. `esc` cancels, `enter` accepts |
 | Agent list | `a` inside the session manager | Agent sessions only, most-recently-active first, with ages |
 | Tab manager | `ctrl+n` | Same controls as the session manager |
 | Pinned sessions | `sessions:` in the config | An F-key opens the session from anywhere, starting it if needed |

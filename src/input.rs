@@ -27,18 +27,18 @@ pub enum Mode {
     Manager {
         overlay: Overlay,
         selected: usize,
-        search: Option<String>,
+        search: Option<TextInput>,
     },
     /// The name prompt for a session/tab being created or renamed.
     Naming {
         overlay: Overlay,
-        name: String,
+        name: TextInput,
         /// `None` = creating something new; `Some` = renaming this.
         rename: Option<RenameTarget>,
     },
     /// The per-pane settings prompt: the auto-run command typed into
     /// the focused pane's shell when the layout is restored.
-    PaneSettings { text: String },
+    PaneSettings { text: TextInput },
 }
 
 /// What a rename prompt applies to.
@@ -807,94 +807,64 @@ fn run_search(
     buf: &[u8],
     overlay: Overlay,
     selected: &mut usize,
-    query: &mut String,
+    query: &mut TextInput,
     sessions: &mut Vec<Session>,
     active: &mut usize,
     size: (u16, u16),
     config: &Config,
 ) -> Result<Option<Mode>> {
-    let matches = |query: &str, sessions: &[Session], active: usize| -> Vec<usize> {
+    let before = query.text.clone();
+    // The field owns editing and cursor movement; up/down come back as
+    // list movement for the manager to apply.
+    let (outcome, moved) = query.apply(buf, 40);
+    let matches = |sessions: &[Session], active: usize| -> Vec<usize> {
         manager_names(overlay, sessions, active, &config.pins)
             .iter()
             .enumerate()
-            .filter(|(_, name)| name_matches(name, query))
+            .filter(|(_, name)| name_matches(name, &query.text))
             .map(|(idx, _)| idx)
             .collect()
     };
-    let mut text = String::new();
-    let mut i = 0;
-    while i < buf.len() {
-        match buf[i] {
-            b'\r' | b'\n' => {
-                query.push_str(&text);
-                let matched = matches(query, sessions, *active);
-                let Some(&orig) = matched.get((*selected).min(matched.len().saturating_sub(1)))
-                else {
-                    return Ok(None); // no matches: stay in the search
-                };
-                match overlay {
-                    Overlay::Sessions { agents } => {
-                        let entries =
-                            crate::agent::manager_entries(&config.pins, sessions, agents);
-                        if let Some(entry) = entries.get(orig) {
-                            *active = match entry.running {
-                                Some(si) => si,
-                                None => {
-                                    create_session(sessions, config, size, entry.name.clone())?
-                                }
-                            };
-                        }
+    // Editing the query re-filters the list, so the old selection index
+    // no longer means anything.
+    if query.text != before {
+        *selected = 0;
+    }
+    if moved != 0 {
+        let count = matches(sessions, *active).len();
+        let last = count.saturating_sub(1);
+        *selected = selected.saturating_add_signed(moved).min(last);
+    }
+
+    match outcome {
+        NamingOutcome::Pending => Ok(None),
+        // Esc drops the filter and returns to the plain manager.
+        NamingOutcome::Cancel => Ok(Some(Mode::Manager {
+            overlay,
+            selected: 0,
+            search: None,
+        })),
+        NamingOutcome::Create => {
+            let matched = matches(sessions, *active);
+            let Some(&orig) = matched.get((*selected).min(matched.len().saturating_sub(1)))
+            else {
+                return Ok(None); // no matches: stay in the search
+            };
+            match overlay {
+                Overlay::Sessions { agents } => {
+                    let entries = crate::agent::manager_entries(&config.pins, sessions, agents);
+                    if let Some(entry) = entries.get(orig) {
+                        *active = match entry.running {
+                            Some(si) => si,
+                            None => create_session(sessions, config, size, entry.name.clone())?,
+                        };
                     }
-                    Overlay::Tabs => sessions[*active].active_tab = orig,
                 }
-                return Ok(Some(Mode::Running));
+                Overlay::Tabs => sessions[*active].active_tab = orig,
             }
-            0x1b => {
-                if buf[i + 1..].starts_with(b"[A") {
-                    *selected = selected.saturating_sub(1);
-                    i += 3;
-                    continue;
-                }
-                if buf[i + 1..].starts_with(b"[B") {
-                    query.push_str(&text);
-                    text.clear();
-                    let count = matches(query, sessions, *active).len();
-                    *selected = (*selected + 1).min(count.saturating_sub(1));
-                    i += 3;
-                    continue;
-                }
-                // Bare Esc: drop the filter, back to the plain manager.
-                return Ok(Some(Mode::Manager {
-                    overlay,
-                    selected: 0,
-                    search: None,
-                }));
-            }
-            0x7f | 0x08 => {
-                if text.pop().is_none() {
-                    query.pop();
-                }
-                *selected = 0;
-            }
-            c if c.is_ascii() && c.is_ascii_control() => {}
-            _ => {
-                // Collect the typed byte run; decoded below in one go.
-                let start = i;
-                while i + 1 < buf.len() && buf[i + 1] >= 0x80 {
-                    i += 1;
-                }
-                text.push_str(&String::from_utf8_lossy(&buf[start..=i]));
-                *selected = 0;
-            }
+            Ok(Some(Mode::Running))
         }
-        i += 1;
     }
-    if !text.is_empty() {
-        query.push_str(&text);
-        let cap = query.char_indices().nth(40).map_or(query.len(), |(n, _)| n);
-        query.truncate(cap);
-    }
-    Ok(None)
 }
 
 /// Apply manager key presses to whichever list the overlay shows.
@@ -922,7 +892,7 @@ pub fn run_manager(
         MgrOutcome::StartSearch => Some(Mode::Manager {
             overlay,
             selected: 0,
-            search: Some(String::new()),
+            search: Some(TextInput::default()),
         }),
         MgrOutcome::ToggleAgents => match overlay {
             Overlay::Sessions { agents } => {
@@ -954,7 +924,7 @@ pub fn run_manager(
         }
         MgrOutcome::StartNaming => Some(Mode::Naming {
             overlay,
-            name: String::new(),
+            name: TextInput::default(),
             rename: None,
         }),
         MgrOutcome::Rename(i) => match overlay {
@@ -963,7 +933,7 @@ pub fn run_manager(
                 match entries.get(i).and_then(|e| e.running) {
                     Some(si) => Some(Mode::Naming {
                         overlay,
-                        name: sessions[si].name.clone(),
+                        name: TextInput::new(sessions[si].name.clone()),
                         rename: Some(RenameTarget::Session(sessions[si].id)),
                     }),
                     // A stopped pin's name comes from the config.
@@ -972,7 +942,7 @@ pub fn run_manager(
             }
             Overlay::Tabs => sessions[*active].tabs.get(i).map(|tab| Mode::Naming {
                 overlay,
-                name: tab.name.clone(),
+                name: TextInput::new(tab.name.clone()),
                 rename: Some(RenameTarget::Tab(i)),
             }),
         },
@@ -1027,20 +997,162 @@ pub enum NamingOutcome {
     Cancel,
 }
 
-/// Apply key presses to the name being typed in the name prompt.
-pub fn naming_apply(buf: &[u8], name: &mut String, max: usize) -> NamingOutcome {
-    for ch in String::from_utf8_lossy(buf).chars() {
-        match ch {
-            '\r' | '\n' => return NamingOutcome::Create,
-            '\u{1b}' => return NamingOutcome::Cancel,
-            '\u{7f}' | '\u{8}' => {
-                name.pop();
-            }
-            c if !c.is_control() && name.chars().count() < max => name.push(c),
-            _ => {}
-        }
+/// A single-line text field with a cursor. Every prompt in rmux — the
+/// name prompts, the pane settings, the manager search — edits through
+/// this, so they all support the same keys.
+#[derive(Default)]
+pub struct TextInput {
+    pub text: String,
+    /// Cursor position, counted in characters (`0..=len`).
+    pub cursor: usize,
+}
+
+impl TextInput {
+    /// A field pre-filled with `text`, cursor at the end.
+    pub fn new(text: String) -> Self {
+        let cursor = text.chars().count();
+        Self { text, cursor }
     }
-    NamingOutcome::Pending
+
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// Byte offset of character `idx` (end of string when past the end).
+    fn byte_at(&self, idx: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(idx)
+            .map_or(self.text.len(), |(b, _)| b)
+    }
+
+    fn insert(&mut self, c: char, max: usize) {
+        if self.len() >= max {
+            return;
+        }
+        let at = self.byte_at(self.cursor);
+        self.text.insert(at, c);
+        self.cursor += 1;
+    }
+
+    /// Delete the character before the cursor.
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let range = self.byte_at(self.cursor - 1)..self.byte_at(self.cursor);
+        self.text.replace_range(range, "");
+        self.cursor -= 1;
+    }
+
+    /// Delete the character under the cursor.
+    fn delete(&mut self) {
+        if self.cursor >= self.len() {
+            return;
+        }
+        let range = self.byte_at(self.cursor)..self.byte_at(self.cursor + 1);
+        self.text.replace_range(range, "");
+    }
+
+    /// Delete the word before the cursor (ctrl+w).
+    fn delete_word(&mut self) {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut start = self.cursor;
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let range = self.byte_at(start)..self.byte_at(self.cursor);
+        self.text.replace_range(range, "");
+        self.cursor = start;
+    }
+
+    /// Apply a chunk of client input. Returns the prompt outcome and the
+    /// net up/down arrow movement (used by the manager search to move
+    /// its selection; the name prompts ignore it).
+    pub fn apply(&mut self, buf: &[u8], max: usize) -> (NamingOutcome, isize) {
+        let mut moved = 0isize;
+        let mut i = 0;
+        while i < buf.len() {
+            match buf[i] {
+                0x1b => {
+                    // CSI (ESC [ ...) or SS3 (ESC O x): a key, not a
+                    // cancel. Anything else beginning with ESC — a bare
+                    // Escape, or an alt+key chord — closes the prompt.
+                    let Some(&intro) = buf.get(i + 1) else {
+                        return (NamingOutcome::Cancel, moved);
+                    };
+                    if intro != b'[' && intro != b'O' {
+                        return (NamingOutcome::Cancel, moved);
+                    }
+                    let mut j = i + 2;
+                    if intro == b'[' {
+                        while j < buf.len() && (0x30..=0x3f).contains(&buf[j]) {
+                            j += 1;
+                        }
+                        while j < buf.len() && (0x20..=0x2f).contains(&buf[j]) {
+                            j += 1;
+                        }
+                    }
+                    let Some(&final_byte) = buf.get(j) else {
+                        break; // sequence split across reads: swallow it
+                    };
+                    let param: u32 = std::str::from_utf8(&buf[i + 2..j])
+                        .ok()
+                        .and_then(|s| s.split(';').next()?.parse().ok())
+                        .unwrap_or(0);
+                    match final_byte {
+                        b'D' => self.cursor = self.cursor.saturating_sub(1),
+                        b'C' => self.cursor = (self.cursor + 1).min(self.len()),
+                        b'A' => moved -= 1,
+                        b'B' => moved += 1,
+                        b'H' => self.cursor = 0,
+                        b'F' => self.cursor = self.len(),
+                        b'~' => match param {
+                            1 | 7 => self.cursor = 0,
+                            3 => self.delete(),
+                            4 | 8 => self.cursor = self.len(),
+                            _ => {}
+                        },
+                        // Unknown sequence: swallow rather than cancel.
+                        _ => {}
+                    }
+                    i = j + 1;
+                    continue;
+                }
+                b'\r' | b'\n' => return (NamingOutcome::Create, moved),
+                0x7f | 0x08 => self.backspace(),
+                0x01 => self.cursor = 0,            // ctrl+a
+                0x05 => self.cursor = self.len(),   // ctrl+e
+                0x15 => {
+                    // ctrl+u: clear the line
+                    self.text.clear();
+                    self.cursor = 0;
+                }
+                0x17 => self.delete_word(),         // ctrl+w
+                b if b < 0x20 => {}                 // other control bytes
+                b => {
+                    // One UTF-8 character, however many bytes it takes.
+                    let width = match b {
+                        0x00..=0x7f => 1,
+                        0xc0..=0xdf => 2,
+                        0xe0..=0xef => 3,
+                        _ => 4,
+                    };
+                    let end = (i + width).min(buf.len());
+                    if let Some(c) = String::from_utf8_lossy(&buf[i..end]).chars().next() {
+                        self.insert(c, max);
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        (NamingOutcome::Pending, moved)
+    }
 }
 
 /// Handle one chunk of client input against the client's viewed session.
@@ -1249,7 +1361,9 @@ pub fn handle_input(
                             .pane(tab.focused)
                             .and_then(|p| p.auto_run.clone())
                             .unwrap_or_default();
-                        next_mode = Some(Mode::PaneSettings { text });
+                        next_mode = Some(Mode::PaneSettings {
+                            text: TextInput::new(text),
+                        });
                     }
                     InputAction::SplitH | InputAction::SplitV => {
                         let dir = match action {
@@ -1342,7 +1456,7 @@ pub fn handle_input(
                 name,
                 rename,
             } => {
-                match naming_apply(buf, name, 40) {
+                match name.apply(buf, 40).0 {
                     NamingOutcome::Pending => {}
                     NamingOutcome::Cancel => {
                         let selected = match overlay {
@@ -1356,7 +1470,7 @@ pub fn handle_input(
                         });
                     }
                     NamingOutcome::Create => {
-                        let typed = std::mem::take(name);
+                        let typed = std::mem::take(&mut name.text);
                         let typed = typed.trim().to_string();
                         match rename {
                             // Rename: apply and return to the manager;
@@ -1418,11 +1532,11 @@ pub fn handle_input(
                 buf = &[];
             }
             Mode::PaneSettings { text } => {
-                match naming_apply(buf, text, 200) {
+                match text.apply(buf, 200).0 {
                     NamingOutcome::Pending => {}
                     NamingOutcome::Cancel => next_mode = Some(Mode::Running),
                     NamingOutcome::Create => {
-                        let cmd = std::mem::take(text).trim().to_string();
+                        let cmd = std::mem::take(&mut text.text).trim().to_string();
                         let session = &mut sessions[*active];
                         let tab = &mut session.tabs[session.active_tab];
                         let focused = tab.focused;

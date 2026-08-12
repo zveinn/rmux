@@ -469,7 +469,7 @@ pub fn run() -> Result<()> {
                             .map(|e| e.name.chars().count())
                             .max()
                             .unwrap_or(0);
-                        let query = search.as_deref();
+                        let query = search.as_ref().map(|q| q.text.as_str());
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for e in &entries {
@@ -511,6 +511,7 @@ pub fn run() -> Result<()> {
                             selected: (*selected).min(items.len().saturating_sub(1)),
                             footer: &footer,
                             search: query,
+                            search_cursor: search.as_ref().map_or(0, |q| q.cursor),
                             min_rows: entries.len(),
                             min_interior,
                         };
@@ -518,7 +519,7 @@ pub fn run() -> Result<()> {
                     }
                     Overlay::Tabs => {
                         let session = &sessions[si];
-                        let query = search.as_deref();
+                        let query = search.as_ref().map(|q| q.text.as_str());
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for (ti, t) in session.tabs.iter().enumerate() {
@@ -545,6 +546,7 @@ pub fn run() -> Result<()> {
                             selected: (*selected).min(items.len().saturating_sub(1)),
                             footer: &footer,
                             search: query,
+                            search_cursor: search.as_ref().map_or(0, |q| q.cursor),
                             min_rows: session.tabs.len(),
                             min_interior,
                         };
@@ -555,7 +557,8 @@ pub fn run() -> Result<()> {
                     draw_naming(
                         &mut buf,
                         "terminal settings · auto-run on restore",
-                        text,
+                        &text.text,
+                        text.cursor,
                         size,
                         config.accent,
                         "enter save · empty clears · esc cancel",
@@ -578,7 +581,7 @@ pub fn run() -> Result<()> {
                     } else {
                         "enter create · esc cancel"
                     };
-                    draw_naming(&mut buf, title, name, size, config.accent, footer)?;
+                    draw_naming(&mut buf, title, &name.text, name.cursor, size, config.accent, footer)?;
                 }
             }
             clients[ci].send(S2C_OUTPUT, &buf);

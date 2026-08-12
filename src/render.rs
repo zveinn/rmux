@@ -394,6 +394,8 @@ pub struct ManagerView<'a> {
     pub footer: &'a str,
     /// Active `/` query, drawn as a search bar in the panel's top row.
     pub search: Option<&'a str>,
+    /// Caret position within that query, in characters.
+    pub search_cursor: usize,
     /// Reserve space for at least this many rows / this interior width,
     /// so the panel doesn't jump around while a search filters it.
     pub min_rows: usize,
@@ -412,6 +414,7 @@ pub fn draw_manager(
         selected,
         footer,
         search,
+        search_cursor,
         min_rows,
         min_interior,
     } = *view;
@@ -438,19 +441,24 @@ pub fn draw_manager(
     let body_rows = list_rows as u16 + 3;
     let panel = draw_panel(out, title, body_rows, min_interior, size)?;
 
-    // The search bar sits in the blank row under the title.
+    // The search bar sits in the blank row under the title, with the
+    // terminal's own cursor parked at the caret.
+    let mut caret = None;
     if let Some(query) = search {
+        let shown = fit(query, panel.iw.saturating_sub(3));
         queue!(
             out,
             MoveTo(panel.x + 2, panel.y + 1),
             SetForegroundColor(accent),
             Print("/"),
             SetForegroundColor(Color::Reset),
-            Print(fit(query, panel.iw.saturating_sub(3))),
-            SetForegroundColor(accent),
-            Print("▏"),
+            Print(&shown),
             SetForegroundColor(Color::Reset),
         )?;
+        caret = Some((
+            panel.x + 3 + search_cursor.min(shown.chars().count()) as u16,
+            panel.y + 1,
+        ));
     }
 
     for (row, item) in shown.iter().enumerate() {
@@ -491,8 +499,11 @@ pub fn draw_manager(
         SetAttribute(Attribute::Dim),
         Print(fit(footer, panel.iw)),
         SetAttribute(Attribute::Reset),
-        EndSynchronizedUpdate,
     )?;
+    if let Some((x, y)) = caret {
+        queue!(out, MoveTo(x, y), Show)?;
+    }
+    queue!(out, EndSynchronizedUpdate)?;
     out.flush()?;
     Ok(())
 }
@@ -502,6 +513,7 @@ pub fn draw_naming(
     out: &mut impl Write,
     title: &str,
     name: &str,
+    cursor: usize,
     size: (u16, u16),
     accent: Color,
     footer: &str,
@@ -516,19 +528,35 @@ pub fn draw_naming(
     let min_interior = (name.chars().count() + 6).max(footer.chars().count());
     let panel = draw_panel(out, title, 4, min_interior, size)?;
 
+    // Text longer than the field scrolls horizontally to keep the
+    // cursor in view instead of being ellipsized.
+    let chars: Vec<char> = name.chars().collect();
+    let width = panel.iw.saturating_sub(2).max(1);
+    let start = if chars.len() <= width {
+        0
+    } else {
+        cursor
+            .saturating_sub(width - 1)
+            .min(chars.len().saturating_sub(width))
+    };
+    let visible: String = chars[start..(start + width).min(chars.len())].iter().collect();
+
     queue!(
         out,
         MoveTo(panel.x + 2, panel.y + 2),
         SetForegroundColor(accent),
         Print("❯ "),
         SetForegroundColor(Color::Reset),
-        Print(fit(name, panel.iw.saturating_sub(2))),
+        Print(&visible),
         MoveTo(panel.x + 2, panel.y + 4),
         SetAttribute(Attribute::Dim),
         Print(fit(footer, panel.iw)),
         SetAttribute(Attribute::Reset),
-        // Park the visible cursor at the end of the typed name.
-        MoveTo(panel.x + 4 + name.chars().count().min(panel.iw) as u16, panel.y + 2),
+        // Put the terminal's own cursor where the caret is.
+        MoveTo(
+            panel.x + 4 + cursor.saturating_sub(start).min(width) as u16,
+            panel.y + 2,
+        ),
         Show,
         EndSynchronizedUpdate,
     )?;
