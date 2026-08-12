@@ -21,7 +21,6 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 
 use libghostty_vt::{
     render::{CellIterator, RenderState, RowIterator},
@@ -33,8 +32,8 @@ use crate::config::{Config, Pin};
 use crate::input::{SessionEntry, create_session};
 use crate::model::{Rect, Session, Tab};
 use crate::protocol::{
-    C2S_AGENT_KILL, C2S_AGENT_NEW, C2S_AGENT_READ, C2S_AGENT_RENAME, C2S_AGENT_SEND, FrameReader,
-    S2C_AGENT_ERR, S2C_AGENT_OK, frame, socket_path,
+    self, C2S_AGENT_KILL, C2S_AGENT_NEW, C2S_AGENT_READ, C2S_AGENT_RENAME, C2S_AGENT_SEND,
+    FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK, frame,
 };
 
 /// Content size for sessions created without a client to size them
@@ -56,14 +55,7 @@ const USAGE: &str = "usage: rmux agent new <session> [tab]\n\
 pub fn run(args: &[String]) -> Result<()> {
     let (kind, payload) = parse_args(args)?;
 
-    let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| {
-        format!(
-            "cannot connect to server at {}: {e}\n\
-             start it with: rmux server  (or: sudo systemctl start rmux)",
-            path.display()
-        )
-    })?;
+    let mut stream = protocol::connect()?;
     stream.write_all(&frame(kind, &payload))?;
 
     let mut reader = FrameReader::new();

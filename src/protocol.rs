@@ -3,6 +3,7 @@
 //!
 //! Frame layout: `[kind: u8][len: u32 LE][payload: len bytes]`.
 
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 /// Client → server: attach to a session by name (creating it if needed).
@@ -51,6 +52,23 @@ pub fn socket_path() -> PathBuf {
         return PathBuf::from(path);
     }
     PathBuf::from(format!("/tmp/rmux-{}.sock", nix::unistd::getuid()))
+}
+
+/// Connect to the server, or explain the failure in terms the user can
+/// act on. The two cases need different advice: no socket file means
+/// nothing is running, while a socket that refuses the connection means
+/// a server died or is mid-restart and starting another won't help.
+pub fn connect() -> crate::Result<UnixStream> {
+    let path = socket_path();
+    UnixStream::connect(&path).map_err(|e| {
+        let hint = if e.kind() == std::io::ErrorKind::ConnectionRefused && path.exists() {
+            "the socket is there but nothing is serving it — the server is \
+             restarting or died; retry shortly (systemctl status rmux)"
+        } else {
+            "start it with: rmux server  (or: sudo systemctl start rmux)"
+        };
+        format!("cannot connect to server at {}: {e}\n{hint}", path.display()).into()
+    })
 }
 
 /// Encode one frame.

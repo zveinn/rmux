@@ -5,7 +5,6 @@
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
 
 use crossterm::{
     cursor::{Hide, Show},
@@ -16,20 +15,13 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 
 use crate::Result;
 use crate::protocol::{
-    C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_BYE, S2C_LIST, S2C_OUTPUT,
-    frame, socket_path,
+    self, C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_BYE, S2C_LIST, S2C_OUTPUT,
+    frame,
 };
 
 /// Print the server's session listing and exit.
 pub fn list() -> Result<()> {
-    let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| {
-        format!(
-            "cannot connect to server at {}: {e}\n\
-             start it with: rmux server  (or: sudo systemctl start rmux)",
-            path.display()
-        )
-    })?;
+    let mut stream = protocol::connect()?;
     stream.write_all(&frame(C2S_LIST, &[]))?;
 
     let mut reader = FrameReader::new();
@@ -77,14 +69,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 pub fn run(name: &str) -> Result<()> {
-    let path = socket_path();
-    let mut stream = UnixStream::connect(&path).map_err(|e| {
-        format!(
-            "cannot connect to server at {}: {e}\n\
-             start it with: rmux server  (or: sudo systemctl start rmux)",
-            path.display()
-        )
-    })?;
+    let mut stream = protocol::connect()?;
 
     let mut size = match terminal::size() {
         Ok((0, _)) | Ok((_, 0)) | Err(_) => (80, 24),

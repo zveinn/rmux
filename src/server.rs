@@ -9,6 +9,7 @@
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{
     queue,
@@ -29,6 +30,16 @@ use crate::render::{ListItem, Renderer, content_size, draw_manager, draw_naming,
 
 /// A slow client gets this much buffered output before being dropped.
 const MAX_OUTBUF: usize = 8 * 1024 * 1024;
+
+/// Raised by the stop-signal handler; the poll loop sees it and runs the
+/// shutdown path.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Stop-signal handler. Flipping a flag is the only async-signal-safe
+/// thing worth doing here — the loop does the actual shutdown.
+extern "C" fn on_stop_signal(_sig: i32) {
+    SHUTDOWN.store(true, Ordering::Relaxed);
+}
 
 /// One connected client.
 struct ClientConn {
@@ -156,6 +167,16 @@ pub fn run() -> Result<()> {
             nix::sys::signal::SigHandler::SigIgn,
         );
     }
+    // Catch the stop signals rather than dying on the default action,
+    // which leaves the socket file behind — clients then get
+    // ECONNREFUSED (a socket nobody serves) instead of a clean "not
+    // running", and the panes outlive us until systemd's SIGKILL.
+    unsafe {
+        use nix::sys::signal::{SigHandler, Signal, signal};
+        for sig in [Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP] {
+            let _ = signal(sig, SigHandler::Handler(on_stop_signal));
+        }
+    }
     let listener = bind_listener()?;
     let mut renderer = Renderer::new()?;
     // Bring back the sessions (tabs, splits, shell cwds) saved on the
@@ -222,17 +243,30 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            poll(&mut fds, PollTimeout::from(100u16))?;
-            fds.iter()
-                .map(|f| {
-                    let r = f.revents().unwrap_or(PollFlags::empty());
-                    (
-                        r.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR),
-                        r.contains(PollFlags::POLLOUT),
-                    )
-                })
-                .collect()
+            match poll(&mut fds, PollTimeout::from(100u16)) {
+                Ok(_) => fds
+                    .iter()
+                    .map(|f| {
+                        let r = f.revents().unwrap_or(PollFlags::empty());
+                        (
+                            r.intersects(
+                                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
+                            ),
+                            r.contains(PollFlags::POLLOUT),
+                        )
+                    })
+                    .collect(),
+                // A signal (a stop signal, or SIGWINCH from a pane) cut
+                // the wait short; revents are meaningless, so treat the
+                // round as idle and come back next iteration.
+                Err(nix::errno::Errno::EINTR) => vec![(false, false); fds.len()],
+                Err(e) => return Err(e.into()),
+            }
         };
+
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
 
         // ---- Accept new clients. ----
         if ready[0].0 {
@@ -553,6 +587,31 @@ pub fn run() -> Result<()> {
         // ---- Drop finished clients (sessions keep running). ----
         clients.retain(|c| !c.dead && !(c.closing && c.outbuf.is_empty()));
     }
+
+    // ---- Orderly shutdown on SIGTERM/SIGINT/SIGHUP. ----
+    // Unlink before anything slow: a client racing us then gets "no
+    // server" rather than a connection to a socket we will never serve.
+    let path = socket_path();
+    let _ = std::fs::remove_file(&path);
+    drop(listener);
+    // Save while the shells still live — layout.json records each pane's
+    // cwd, read from /proc/<pid>/cwd.
+    crate::state::save(&sessions);
+    // Agent sessions are deliberately left out of saved state, so count
+    // what actually landed in layout.json.
+    let saved = sessions.iter().filter(|s| !s.agent).count();
+    for client in &mut clients {
+        client.bye("server shutting down");
+    }
+    drop(clients);
+    // Dropping the sessions closes every pty master, so the shells get
+    // SIGHUP and exit on their own. Without this they would sit there
+    // until systemd gave up waiting and sent SIGKILL — interactive bash
+    // ignores SIGTERM, so the service stop blocked for the full
+    // TimeoutStopSec every restart.
+    drop(sessions);
+    eprintln!("rmux server stopped ({saved} sessions saved)");
+    Ok(())
 }
 
 /// Handle one protocol frame from client `ci`.
