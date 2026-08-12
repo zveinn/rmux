@@ -130,6 +130,7 @@ swallowed by rmux and never reach the inner shell.
 | Focus | `ctrl+h/j/k/l` directional · `ctrl+t` cycle | Left/right cross tab boundaries, wrapping — tabs form one strip. The focused pane's frame is accent-colored with centered `▸◂▴▾` arrows pointing into it |
 | Fullscreen | `ctrl+f` | Focused pane takes the whole area; tab bar shows `[F]` |
 | Scrollback | mouse wheel · `PageUp`/`PageDown` | `scrollback_lines:` per pane (default 5000); the wheel scrolls the pane under the pointer, typing snaps back to live. Apps that track the mouse or run full-screen get the events instead |
+| Focus by mouse | click (any button) · scroll | Clicking or scrolling a pane focuses it, including panes running mouse-tracking apps — the click still reaches the app |
 | Select to copy | drag · double-click = word · click = focus pane | `select_copy:` (default on). Releasing copies to your clipboard via OSC 52 — in-band, so it works across SSH; your terminal must allow OSC 52 writes. Panes tracking the mouse (vim, htop) get the mouse instead |
 | Mouse passthrough | automatic | Apps that track the mouse (lazygit, vim, htop) get events in their own pane-local coordinates, re-encoded into the protocol they asked for (SGR, X10, urxvt) and filtered to their tracking mode |
 | App clipboard | automatic | OSC 52 yanks from programs inside panes (helix `space+y`, vim) are forwarded to your local clipboard, clipboard/primary register preserved |

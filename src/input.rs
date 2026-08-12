@@ -515,7 +515,6 @@ fn apply_select(
             clear_only_selection(select, sessions);
             let session = &mut sessions[active];
             let tab = &mut session.tabs[session.active_tab];
-            tab.focused = pane_id;
             if kind == 3 || !enabled {
                 return None; // middle/right click: focus only
             }
@@ -1133,6 +1132,18 @@ pub fn handle_input(
                 // Pane-local cell coordinates, clamped into the pane.
                 let lx = px.clamp(rect.x, rect.x + rect.w.saturating_sub(1)) - rect.x;
                 let ly = py.clamp(rect.y, rect.y + rect.h.saturating_sub(1)) - rect.y;
+
+                // A click (any button) or a scroll focuses the pane it
+                // landed in, so the mouse and the keyboard can never
+                // point at different panes. This has to happen before
+                // routing, since apps that track the mouse take the
+                // event and never reach the selection path. Drags and
+                // releases belong to a gesture already in progress.
+                if matches!(kind, 0 | 3 | 4) {
+                    let session = &mut sessions[*active];
+                    let tab = &mut session.tabs[session.active_tab];
+                    tab.focused = pane_id;
+                }
 
                 let session = &mut sessions[*active];
                 let tab = &mut session.tabs[session.active_tab];
