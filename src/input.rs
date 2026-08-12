@@ -171,15 +171,31 @@ pub fn forward_input(pty: &Pty, bindings: &[Binding], buf: &[u8]) -> Option<(Inp
 /// the original SGR bytes so panes that track the mouse themselves get
 /// the event untouched.
 pub enum MouseEvent {
-    Wheel { up: bool, raw: Vec<u8> },
+    /// Wheel notch; `cb` is the SGR button byte (modifiers included),
+    /// `x`/`y` are 1-based screen coordinates.
+    Wheel { up: bool, cb: u32, x: u16, y: u16 },
     /// PageUp / PageDown.
     Page { up: bool },
-    /// Button press; 1-based screen coordinates.
-    Press { left: bool, x: u16, y: u16, raw: Vec<u8> },
-    /// Motion with the left button held.
-    Drag { x: u16, y: u16, raw: Vec<u8> },
+    /// Button press.
+    Press { left: bool, cb: u32, x: u16, y: u16 },
+    /// Motion with a button held.
+    Drag { cb: u32, x: u16, y: u16 },
     /// Button release.
-    Release { x: u16, y: u16, raw: Vec<u8> },
+    Release { cb: u32, x: u16, y: u16 },
+}
+
+impl MouseEvent {
+    /// (button byte, screen x, screen y) for events that have a
+    /// position; `None` for PageUp/PageDown.
+    fn at(&self) -> Option<(u32, u16, u16)> {
+        match self {
+            MouseEvent::Wheel { cb, x, y, .. }
+            | MouseEvent::Press { cb, x, y, .. }
+            | MouseEvent::Drag { cb, x, y }
+            | MouseEvent::Release { cb, x, y } => Some((*cb, *x, *y)),
+            MouseEvent::Page { .. } => None,
+        }
+    }
 }
 
 /// Split raw input into (bytes to process normally, mouse events).
@@ -204,28 +220,27 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
                 let cb = params.next().unwrap_or(0);
                 let x = params.next().unwrap_or(1).clamp(1, u32::from(u16::MAX)) as u16;
                 let y = params.next().unwrap_or(1).clamp(1, u32::from(u16::MAX)) as u16;
-                let raw = buf[i..=j].to_vec();
                 if cb & 64 != 0 {
                     // Wheel: low two bits 0 (up) or 1 (down); modifier
                     // bits may also be set. Wheel left/right dropped.
                     if buf[j] == b'M' && cb & 2 == 0 {
                         events.push(MouseEvent::Wheel {
                             up: cb & 1 == 0,
-                            raw,
+                            cb,
+                            x,
+                            y,
                         });
                     }
                 } else if buf[j] == b'm' {
-                    events.push(MouseEvent::Release { x, y, raw });
+                    events.push(MouseEvent::Release { cb, x, y });
                 } else if cb & 32 != 0 {
-                    if cb & 3 == 0 {
-                        events.push(MouseEvent::Drag { x, y, raw });
-                    }
+                    events.push(MouseEvent::Drag { cb, x, y });
                 } else {
                     events.push(MouseEvent::Press {
                         left: cb & 3 == 0,
+                        cb,
                         x,
                         y,
-                        raw,
                     });
                 }
                 i = j + 1;
@@ -250,50 +265,183 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
     (clean, events)
 }
 
-/// Apply scroll events to the focused pane: panes tracking the mouse
-/// get the raw wheel bytes, alt-screen apps get arrow/page keys (like
-/// most terminal emulators), everything else scrolls our scrollback.
-fn apply_scroll(event: &MouseEvent, sessions: &mut [Session], active: usize) {
+/// Pane rectangles of a session's visible tab, in content coordinates
+/// (the tab bar is already excluded by `size`).
+fn tab_rects(session: &Session, size: (u16, u16)) -> Vec<(u64, Rect)> {
+    let tab = &session.tabs[session.active_tab];
+    let full = Rect {
+        x: 0,
+        y: 0,
+        w: size.0,
+        h: size.1,
+    };
+    let mut rects: Vec<(u64, Rect)> = Vec::new();
+    if tab.zoomed {
+        rects.push((tab.focused, full));
+    } else {
+        let _ = tab.layout.for_each(full, &mut |pane, rect| {
+            rects.push((pane.id, rect));
+            Ok(())
+        });
+    }
+    rects
+}
+
+/// Which pane a pointer event belongs to. Drags and releases stick to
+/// the pane the gesture started in (so a drag that leaves the pane
+/// still extends its selection); everything else hit-tests the point.
+fn pointer_target(
+    rects: &[(u64, Rect)],
+    sticky: Option<u64>,
+    px: u16,
+    py: u16,
+) -> Option<(u64, Rect)> {
+    let hit = rects
+        .iter()
+        .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+        .map(|(id, _)| *id);
+    let id = sticky.or(hit)?;
+    rects
+        .iter()
+        .find(|(pid, _)| *pid == id)
+        .map(|(pid, r)| (*pid, *r))
+}
+
+/// Send a mouse event to an application that asked to track the mouse.
+///
+/// Coordinates are translated into the pane's own cell space — the app
+/// believes it owns the whole screen, so forwarding raw screen
+/// coordinates would land clicks off by the pane's origin. Encoding is
+/// delegated to libghostty, which emits whatever protocol the app
+/// actually requested (X10, SGR, urxvt, ...) and drops events its
+/// tracking mode doesn't want (e.g. motion for a click-only app).
+fn forward_mouse(
+    encoder: &mut Option<libghostty_vt::mouse::Encoder<'static>>,
+    pane: &crate::model::Pane,
+    rect: Rect,
+    cb: u32,
+    press: bool,
+    lx: u16,
+    ly: u16,
+) {
+    use libghostty_vt::key::Mods;
+    use libghostty_vt::mouse::{Action, Button, Encoder, EncoderSize, Event, Position};
+
+    let enc = match encoder {
+        Some(enc) => enc,
+        None => match Encoder::new() {
+            Ok(new) => encoder.insert(new),
+            Err(_) => return,
+        },
+    };
+
+    let motion = cb & 32 != 0;
+    let wheel = cb & 64 != 0;
+    let action = match (press, motion) {
+        (false, _) => Action::Release,
+        (_, true) => Action::Motion,
+        _ => Action::Press,
+    };
+    let button = if wheel {
+        match cb & 3 {
+            0 => Button::Four,  // wheel up
+            1 => Button::Five,  // wheel down
+            2 => Button::Six,   // wheel left
+            _ => Button::Seven, // wheel right
+        }
+    } else if cb & 128 != 0 {
+        match cb & 3 {
+            0 => Button::Eight,
+            1 => Button::Nine,
+            2 => Button::Ten,
+            _ => Button::Eleven,
+        }
+    } else {
+        match cb & 3 {
+            0 => Button::Left,
+            1 => Button::Middle,
+            2 => Button::Right,
+            _ => Button::Unknown,
+        }
+    };
+    let mut mods = Mods::empty();
+    if cb & 4 != 0 {
+        mods |= Mods::SHIFT;
+    }
+    if cb & 8 != 0 {
+        mods |= Mods::ALT;
+    }
+    if cb & 16 != 0 {
+        mods |= Mods::CTRL;
+    }
+
+    let (cw, ch) = crate::model::CELL_PX;
+    let build = (|| -> crate::Result<Vec<u8>> {
+        let mut event = Event::new()?;
+        event
+            .set_action(action)
+            .set_button(Some(button))
+            .set_mods(mods)
+            // Aim at the middle of the cell so rounding can't spill
+            // into a neighbour.
+            .set_position(Position {
+                x: (f32::from(lx) + 0.5) * cw as f32,
+                y: (f32::from(ly) + 0.5) * ch as f32,
+            });
+        enc.set_options_from_terminal(&pane.term)
+            .set_any_button_pressed(motion && !wheel)
+            .set_size(EncoderSize {
+                screen_width: u32::from(rect.w.max(1)) * cw,
+                screen_height: u32::from(rect.h.max(1)) * ch,
+                cell_width: cw,
+                cell_height: ch,
+                padding_top: 0,
+                padding_bottom: 0,
+                padding_right: 0,
+                padding_left: 0,
+            });
+        let mut out = Vec::with_capacity(16);
+        enc.encode_to_vec(&event, &mut out)?;
+        Ok(out)
+    })();
+    // An empty encoding means the app's tracking mode doesn't want it.
+    if let Ok(bytes) = build
+        && !bytes.is_empty()
+    {
+        pane.pty.write(&bytes);
+    }
+}
+
+/// Scroll one pane: alt-screen apps get arrow keys (like most terminal
+/// emulators), everything else scrolls our own scrollback.
+fn scroll_pane(pane: &mut crate::model::Pane, up: bool, page: bool) {
     use libghostty_vt::screen::Screen;
     use libghostty_vt::terminal::{Mode as TermMode, ScrollViewport};
 
-    let session = &mut sessions[active];
-    let tab = &mut session.tabs[session.active_tab];
-    let focused = tab.focused;
-    let Some(pane) = tab.layout.pane_mut(focused) else {
-        return;
-    };
-    let tracking = pane.term.is_mouse_tracking().unwrap_or(false);
     let alt = matches!(pane.term.active_screen(), Ok(Screen::Alternate));
-    match event {
-        MouseEvent::Wheel { up, raw } => {
-            if tracking {
-                pane.pty.write(raw);
-            } else if alt {
-                let key: &[u8] = match (pane.term.mode(TermMode::DECCKM), up) {
-                    (Ok(true), true) => b"\x1bOA",
-                    (Ok(true), false) => b"\x1bOB",
-                    (_, true) => b"\x1b[A",
-                    (_, false) => b"\x1b[B",
-                };
-                for _ in 0..3 {
-                    pane.pty.write(key);
-                }
-            } else {
-                let delta = if *up { -3 } else { 3 };
-                pane.term.scroll_viewport(ScrollViewport::Delta(delta));
-            }
+    if page {
+        if alt {
+            pane.pty.write(if up { b"\x1b[5~" } else { b"\x1b[6~" });
+        } else {
+            let rows = pane.term.rows().unwrap_or(24).saturating_sub(2) as isize;
+            let delta = if up { -rows } else { rows };
+            pane.term.scroll_viewport(ScrollViewport::Delta(delta));
         }
-        MouseEvent::Page { up } => {
-            if alt || tracking {
-                pane.pty.write(if *up { b"\x1b[5~" } else { b"\x1b[6~" });
-            } else {
-                let page = pane.term.rows().unwrap_or(24).saturating_sub(2) as isize;
-                let delta = if *up { -page } else { page };
-                pane.term.scroll_viewport(ScrollViewport::Delta(delta));
-            }
+        return;
+    }
+    if alt {
+        let key: &[u8] = match (pane.term.mode(TermMode::DECCKM), up) {
+            (Ok(true), true) => b"\x1bOA",
+            (Ok(true), false) => b"\x1bOB",
+            (_, true) => b"\x1b[A",
+            (_, false) => b"\x1b[B",
+        };
+        for _ in 0..3 {
+            pane.pty.write(key);
         }
-        _ => {}
+    } else {
+        let delta = if up { -3 } else { 3 };
+        pane.term.scroll_viewport(ScrollViewport::Delta(delta));
     }
 }
 
@@ -309,6 +457,9 @@ pub struct SelectState {
     backward: bool,
     /// Monotonic base for click timestamps (double-click detection).
     epoch: std::time::Instant,
+    /// Encoder for events forwarded to apps that track the mouse; it
+    /// keeps motion-dedup state, so it is per-client and long-lived.
+    encoder: Option<libghostty_vt::mouse::Encoder<'static>>,
 }
 
 impl Default for SelectState {
@@ -319,6 +470,7 @@ impl Default for SelectState {
             anchor: None,
             backward: false,
             epoch: std::time::Instant::now(),
+            encoder: None,
         }
     }
 }
@@ -342,87 +494,20 @@ fn clear_selection(select: &mut SelectState, sessions: &mut [Session]) {
 /// Handle press/drag/release for mouse select-to-copy. Returns text to
 /// copy to the client's clipboard when a selection completes.
 fn apply_select(
-    event: &MouseEvent,
+    kind: u8,
+    pane_id: u64,
+    rect: Rect,
+    lx: u16,
+    ly: u16,
     select: &mut SelectState,
     sessions: &mut [Session],
     active: usize,
-    size: (u16, u16),
     enabled: bool,
-    bar_top: bool,
 ) -> Option<String> {
     use libghostty_vt::selection::gesture::{DragEvent, Gesture, PressEvent, ReleaseEvent};
     use libghostty_vt::selection::FormatOptions;
     use libghostty_vt::terminal::{Point, PointCoordinate};
     use std::time::Duration;
-
-    let (x, y, raw, kind) = match event {
-        MouseEvent::Press { left, x, y, raw } => (*x, *y, raw, if *left { 0 } else { 3 }),
-        MouseEvent::Drag { x, y, raw } => (*x, *y, raw, 1),
-        MouseEvent::Release { x, y, raw } => (*x, *y, raw, 2),
-        _ => return None,
-    };
-    // 1-based screen coords -> 0-based content coords (a top bar
-    // shifts the content down one row; clicks on the bar are ignored).
-    let px = x.saturating_sub(1);
-    let py = y.checked_sub(1 + u16::from(bar_top))?;
-
-    // Pane rectangles of the visible tab.
-    let session = &mut sessions[active];
-    let tab = &mut session.tabs[session.active_tab];
-    let full = Rect {
-        x: 0,
-        y: 0,
-        w: size.0,
-        h: size.1,
-    };
-    let mut rects: Vec<(u64, Rect)> = Vec::new();
-    if tab.zoomed {
-        rects.push((tab.focused, full));
-    } else {
-        let _ = tab.layout.for_each(full, &mut |pane, rect| {
-            rects.push((pane.id, rect));
-            Ok(())
-        });
-    }
-
-    // Drags/releases stick to the gesture's pane; presses hit-test.
-    let target = match kind {
-        1 | 2 => select.gesture.as_ref().map(|(pid, _)| *pid).or_else(|| {
-            rects
-                .iter()
-                .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
-                .map(|(id, _)| *id)
-        }),
-        _ => rects
-            .iter()
-            .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
-            .map(|(id, _)| *id),
-    };
-    let (pane_id, rect) = match target.and_then(|id| {
-        rects
-            .iter()
-            .find(|(pid, _)| *pid == id)
-            .map(|(pid, r)| (*pid, *r))
-    }) {
-        Some(v) => v,
-        None => return None, // divider or tab bar
-    };
-
-    // Panes that track the mouse get the raw event; no rmux selection.
-    let tracking = tab
-        .layout
-        .pane(pane_id)
-        .is_some_and(|p| p.term.is_mouse_tracking().unwrap_or(false));
-    if tracking {
-        if let Some(pane) = tab.layout.pane(pane_id) {
-            pane.pty.write(raw);
-        }
-        return None;
-    }
-
-    // Pane-local cell coordinates, clamped into the pane.
-    let lx = px.clamp(rect.x, rect.x + rect.w.saturating_sub(1)) - rect.x;
-    let ly = py.clamp(rect.y, rect.y + rect.h.saturating_sub(1)) - rect.y;
 
     match kind {
         // Press: click-to-focus, then anchor a selection gesture.
@@ -1003,23 +1088,90 @@ pub fn handle_input(
     match mode {
         Mode::Running => {
             for event in &mouse {
-                match event {
-                    MouseEvent::Wheel { .. } | MouseEvent::Page { .. } => {
-                        apply_scroll(event, sessions, *active);
-                    }
-                    _ => {
-                        if let Some(text) = apply_select(
-                            event,
-                            select,
-                            sessions,
-                            *active,
-                            size,
-                            config.select_copy,
-                            config.bar_top,
-                        ) {
-                            copied = Some(text);
+                // PageUp/PageDown have no position: they act on the
+                // focused pane.
+                let Some((cb, x, y)) = event.at() else {
+                    let session = &mut sessions[*active];
+                    let tab = &mut session.tabs[session.active_tab];
+                    let focused = tab.focused;
+                    let up = matches!(event, MouseEvent::Page { up: true });
+                    if let Some(pane) = tab.layout.pane_mut(focused) {
+                        if pane.term.is_mouse_tracking().unwrap_or(false) {
+                            pane.pty.write(if up { b"\x1b[5~" } else { b"\x1b[6~" });
+                        } else {
+                            scroll_pane(pane, up, true);
                         }
                     }
+                    continue;
+                };
+
+                // 1-based screen coords -> 0-based content coords (a
+                // top bar shifts content down a row; the bar itself is
+                // not part of any pane).
+                let px = x.saturating_sub(1);
+                let Some(py) = y.checked_sub(1 + u16::from(config.bar_top)) else {
+                    continue;
+                };
+
+                let kind = match event {
+                    MouseEvent::Press { left: true, .. } => 0u8,
+                    MouseEvent::Press { .. } => 3,
+                    MouseEvent::Drag { .. } => 1,
+                    MouseEvent::Release { .. } => 2,
+                    _ => 4, // wheel
+                };
+                // Drags and releases belong to the pane the gesture
+                // started in; presses and wheel hit-test the point.
+                let sticky = match kind {
+                    1 | 2 => select.gesture.as_ref().map(|(pid, _)| *pid),
+                    _ => None,
+                };
+                let rects = tab_rects(&sessions[*active], size);
+                let Some((pane_id, rect)) = pointer_target(&rects, sticky, px, py) else {
+                    continue; // divider or outside every pane
+                };
+                // Pane-local cell coordinates, clamped into the pane.
+                let lx = px.clamp(rect.x, rect.x + rect.w.saturating_sub(1)) - rect.x;
+                let ly = py.clamp(rect.y, rect.y + rect.h.saturating_sub(1)) - rect.y;
+
+                let session = &mut sessions[*active];
+                let tab = &mut session.tabs[session.active_tab];
+                let tracking = tab
+                    .layout
+                    .pane(pane_id)
+                    .is_some_and(|p| p.term.is_mouse_tracking().unwrap_or(false));
+
+                if tracking {
+                    // The app wants the mouse: hand it the event in its
+                    // own coordinate space and protocol.
+                    if let Some(pane) = tab.layout.pane(pane_id) {
+                        let press = !matches!(event, MouseEvent::Release { .. });
+                        forward_mouse(&mut select.encoder, pane, rect, cb, press, lx, ly);
+                    }
+                    continue;
+                }
+
+                if kind == 4 {
+                    // Wheel scrolls the pane under the pointer.
+                    let up = matches!(event, MouseEvent::Wheel { up: true, .. });
+                    if let Some(pane) = tab.layout.pane_mut(pane_id) {
+                        scroll_pane(pane, up, false);
+                    }
+                    continue;
+                }
+
+                if let Some(text) = apply_select(
+                    kind,
+                    pane_id,
+                    rect,
+                    lx,
+                    ly,
+                    select,
+                    sessions,
+                    *active,
+                    config.select_copy,
+                ) {
+                    copied = Some(text);
                 }
             }
             if !clean.is_empty() {
