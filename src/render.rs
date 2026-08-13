@@ -432,7 +432,7 @@ pub fn draw_manager(
 
     let min_interior = items
         .iter()
-        .map(|i| i.label.chars().count() + 4)
+        .map(|i| i.label.chars().count() + 2)
         .chain([footer.chars().count(), min_interior])
         .max()
         .unwrap_or(0);
@@ -474,20 +474,19 @@ pub fn draw_manager(
         } else {
             queue!(out, Print("  "))?;
         }
-        if item.active {
-            queue!(out, SetForegroundColor(accent), Print("● "))?;
-            if !is_selected {
-                queue!(out, SetForegroundColor(Color::Reset))?;
-            }
-        } else {
-            queue!(out, Print("  "))?;
-        }
+        // The open session/tab is named in the accent color; the ❯
+        // above marks where the cursor sits, so the two signals stay
+        // independent.
+        queue!(
+            out,
+            SetForegroundColor(if item.active { accent } else { Color::Reset }),
+        )?;
         if item.dim && !is_selected {
             queue!(out, SetAttribute(Attribute::Dim))?;
         }
         queue!(
             out,
-            Print(fit(&item.label, panel.iw.saturating_sub(4))),
+            Print(fit(&item.label, panel.iw.saturating_sub(2))),
             SetAttribute(Attribute::Reset),
             SetForegroundColor(Color::Reset),
         )?;

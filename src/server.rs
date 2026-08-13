@@ -481,7 +481,7 @@ pub fn run() -> Result<()> {
                                 ),
                                 _ => e.name.clone(),
                             };
-                            min_interior = min_interior.max(label.chars().count() + 4);
+                            min_interior = min_interior.max(label.chars().count() + 2);
                             if query.is_none_or(|q| crate::input::name_matches(&e.name, q)) {
                                 items.push(ListItem {
                                     label,
@@ -523,7 +523,7 @@ pub fn run() -> Result<()> {
                         let mut min_interior = 0;
                         let mut items: Vec<ListItem> = Vec::new();
                         for (ti, t) in session.tabs.iter().enumerate() {
-                            min_interior = min_interior.max(t.name.chars().count() + 4);
+                            min_interior = min_interior.max(t.name.chars().count() + 2);
                             if query.is_none_or(|q| crate::input::name_matches(&t.name, q)) {
                                 items.push(ListItem {
                                     label: t.name.clone(),
