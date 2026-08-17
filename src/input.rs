@@ -1200,9 +1200,6 @@ pub fn handle_input(
                 // top bar shifts content down a row; the bar itself is
                 // not part of any pane).
                 let px = x.saturating_sub(1);
-                let Some(py) = y.checked_sub(1 + u16::from(config.bar_top)) else {
-                    continue;
-                };
 
                 let kind = match event {
                     MouseEvent::Press { left: true, .. } => 0u8,
@@ -1210,6 +1207,24 @@ pub fn handle_input(
                     MouseEvent::Drag { .. } => 1,
                     MouseEvent::Release { .. } => 2,
                     _ => 4, // wheel
+                };
+
+                // The tab bar is rmux's own row: clicking a tab label
+                // opens that tab, and nothing there belongs to a pane.
+                let bar_row = if config.bar_top { 1 } else { size.1 + 1 };
+                if y == bar_row {
+                    if matches!(kind, 0 | 3) {
+                        clear_selection(select, sessions);
+                        let session = &mut sessions[*active];
+                        if let Some(ti) = crate::render::tab_at(session, size.0, px) {
+                            session.active_tab = ti;
+                        }
+                    }
+                    continue;
+                }
+
+                let Some(py) = y.checked_sub(1 + u16::from(config.bar_top)) else {
+                    continue;
                 };
                 // Drags and releases belong to the pane the gesture
                 // started in; presses and wheel hit-test the point.

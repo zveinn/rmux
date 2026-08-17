@@ -107,14 +107,11 @@ fn draw_tab_bar(
     row: u16,
 ) -> Result<()> {
     queue!(out, MoveTo(0, row), SetAttribute(Attribute::Reset))?;
-    let cols = size.0 as usize;
-    let mut used = 0usize;
+    let (chip, segments) = tab_bar_layout(session, size.0);
 
     // Session name as a chip: accent background, terminal-background
     // text (accent foreground + reverse adapts to any theme).
-    let chip = format!(" {} ", session.name);
-    let chip_width = chip.chars().count();
-    if chip_width <= cols {
+    if let Some(chip) = chip {
         queue!(
             out,
             SetForegroundColor(accent),
@@ -122,9 +119,42 @@ fn draw_tab_bar(
             Print(&chip),
             SetAttribute(Attribute::Reset),
         )?;
-        used += chip_width;
     }
 
+    for (i, label, _) in &segments {
+        if *i == session.active_tab {
+            // Accent background chip: accent foreground + reverse gives
+            // accent-colored background with terminal-background text.
+            queue!(
+                out,
+                SetForegroundColor(accent),
+                SetAttribute(Attribute::Reverse),
+            )?;
+        } else {
+            queue!(out, SetAttribute(Attribute::Dim))?;
+        }
+        queue!(out, Print(label), SetAttribute(Attribute::Reset))?;
+    }
+    queue!(out, Clear(ClearType::UntilNewLine))?;
+    Ok(())
+}
+
+/// The tab bar's contents: the session chip (when it fits) and one
+/// `(tab index, label, start column)` per tab that fits on the row.
+/// Drawing and click hit-testing share this, so they cannot disagree
+/// about where a tab is.
+fn tab_bar_layout(session: &Session, cols: u16) -> (Option<String>, Vec<(usize, String, u16)>) {
+    let cols = cols as usize;
+    let chip = format!(" {} ", session.name);
+    let mut used = 0usize;
+    let chip = if chip.chars().count() <= cols {
+        used += chip.chars().count();
+        Some(chip)
+    } else {
+        None
+    };
+
+    let mut segments = Vec::new();
     for (i, tab) in session.tabs.iter().enumerate() {
         // A fullscreened tab advertises it in its label.
         let label = if tab.zoomed {
@@ -136,22 +166,21 @@ fn draw_tab_bar(
         if used + width > cols {
             break;
         }
-        if i == session.active_tab {
-            // Accent background chip: accent foreground + reverse gives
-            // accent-colored background with terminal-background text.
-            queue!(
-                out,
-                SetForegroundColor(accent),
-                SetAttribute(Attribute::Reverse),
-            )?;
-        } else {
-            queue!(out, SetAttribute(Attribute::Dim))?;
-        }
-        queue!(out, Print(&label), SetAttribute(Attribute::Reset))?;
+        segments.push((i, label, used as u16));
         used += width;
     }
-    queue!(out, Clear(ClearType::UntilNewLine))?;
-    Ok(())
+    (chip, segments)
+}
+
+/// The tab whose label covers column `x` of the tab bar, if any.
+pub fn tab_at(session: &Session, cols: u16, x: u16) -> Option<usize> {
+    tab_bar_layout(session, cols)
+        .1
+        .into_iter()
+        .find(|(_, label, start)| {
+            x >= *start && x < start + label.chars().count() as u16
+        })
+        .map(|(i, _, _)| i)
 }
 
 // Line-component bits for box-drawing junction resolution.
