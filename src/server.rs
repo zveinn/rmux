@@ -134,6 +134,13 @@ fn bind_listener() -> Result<UnixListener> {
     Ok(listener)
 }
 
+/// Device+inode of the socket file, so the server can tell its own
+/// listening socket from a replacement — or from nothing at all.
+fn socket_id(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
 /// Modification time of the config file, if any.
 fn config_mtime() -> Option<std::time::SystemTime> {
     let path = config::path()?;
@@ -177,7 +184,10 @@ pub fn run() -> Result<()> {
             let _ = signal(sig, SigHandler::Handler(on_stop_signal));
         }
     }
-    let listener = bind_listener()?;
+    let mut listener = bind_listener()?;
+    let sock_path = socket_path();
+    let mut bound_id = socket_id(&sock_path);
+    let mut rebind_failed = false;
     let mut renderer = Renderer::new()?;
     // Bring back the sessions (tabs, splits, shell cwds) saved on the
     // last run; agent sessions are not part of saved state.
@@ -213,6 +223,31 @@ pub fn run() -> Result<()> {
                         eprintln!("config reloaded");
                     }
                     Err(e) => eprintln!("config reload failed (keeping old config): {e}"),
+                }
+            }
+        }
+
+        // ---- Re-bind if the socket file vanished under us (a /tmp
+        // cleaner, a stray rm). Unlinking the path does not disturb the
+        // listening socket, so without this the server keeps running,
+        // perfectly healthy as far as systemd can tell, while every
+        // client gets "no such file or directory" and is told to start
+        // a server that is already up.
+        if tick % 10 == 0 && socket_id(&sock_path) != bound_id {
+            match bind_listener() {
+                Ok(new_listener) => {
+                    eprintln!("socket {} went missing; re-bound it", sock_path.display());
+                    listener = new_listener;
+                    bound_id = socket_id(&sock_path);
+                    rebind_failed = false;
+                }
+                Err(e) => {
+                    // Someone else owns the path now: say so once and
+                    // keep serving the clients already connected.
+                    if !rebind_failed {
+                        eprintln!("socket {} is gone: {e}", sock_path.display());
+                        rebind_failed = true;
+                    }
                 }
             }
         }
