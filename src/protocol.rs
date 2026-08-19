@@ -41,16 +41,25 @@ pub const S2C_AGENT_ERR: u8 = 5;
 /// Ceiling on a single frame; anything larger is a protocol error.
 pub const MAX_FRAME: usize = 64 * 1024 * 1024;
 
-/// Where the server listens. Overridable for tests via `RMUX_SOCK`.
+/// Where the server listens, for both sides of the connection.
+/// Overridable via `RMUX_SOCK`.
 ///
 /// Deliberately not under `$XDG_RUNTIME_DIR`: that dir is torn down on
 /// logout and unset for system services, so server (systemd) and client
-/// (login session) would disagree. `/tmp/rmux-<uid>.sock` is stable and
-/// visible to both.
+/// (login session) would disagree.
 pub fn socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("RMUX_SOCK") {
         return PathBuf::from(path);
     }
+    // Beside config.yaml and layout.json (and so it follows --config):
+    // a stable per-user directory. /tmp would be the traditional spot,
+    // but tmp cleaners delete files untouched for days, and a socket
+    // nobody has stat'ed is exactly that — a long-lived server would
+    // eventually lose the path clients reach it by.
+    if let Some(dir) = crate::config::path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        return dir.join("rmux.sock");
+    }
+    // No home to speak of: fall back to the old location.
     PathBuf::from(format!("/tmp/rmux-{}.sock", nix::unistd::getuid()))
 }
 
