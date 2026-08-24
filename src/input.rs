@@ -768,6 +768,13 @@ pub fn manager_actions(buf: &[u8], bindings: &[Binding]) -> Vec<MgrAction> {
 /// Apply manager key presses; any actions after one that leaves the
 /// manager are dropped.
 fn manager_apply(actions: &[MgrAction], selected: &mut usize, count: usize) -> MgrOutcome {
+    // Drop a stale cursor (a sessions-vec index, a killed row) onto the
+    // last real row before moving, so up/down never walk phantom slots.
+    if count == 0 {
+        *selected = 0;
+    } else {
+        *selected = (*selected).min(count - 1);
+    }
     for action in actions {
         match action {
             MgrAction::Up => *selected = selected.saturating_sub(1),
@@ -797,6 +804,27 @@ pub fn manager_names(overlay: Overlay, sessions: &[Session], active: usize, pins
             .map(|e| e.name)
             .collect(),
         Overlay::Tabs => sessions[active].tabs.iter().map(|t| t.name.clone()).collect(),
+    }
+}
+
+/// How many rows the overlay currently lists.
+pub fn manager_count(overlay: Overlay, sessions: &[Session], active: usize, pins: &[Pin]) -> usize {
+    match overlay {
+        Overlay::Sessions { agents } => crate::agent::manager_entries(pins, sessions, agents).len(),
+        Overlay::Tabs => sessions.get(active).map(|s| s.tabs.len()).unwrap_or(0),
+    }
+}
+
+/// Highlight index of the viewed session/tab in the overlay's list.
+/// A session that belongs to the other list (agent vs normal) is not a
+/// row here, so the cursor falls back to 0 rather than the raw vec index.
+pub fn manager_cursor(overlay: Overlay, sessions: &[Session], active: usize, pins: &[Pin]) -> usize {
+    match overlay {
+        Overlay::Sessions { agents } => crate::agent::manager_entries(pins, sessions, agents)
+            .iter()
+            .position(|e| e.running == Some(active))
+            .unwrap_or(0),
+        Overlay::Tabs => sessions.get(active).map(|s| s.active_tab).unwrap_or(0),
     }
 }
 
@@ -882,10 +910,7 @@ pub fn run_manager(
 ) -> Result<Option<Mode>> {
     let pins: &[Pin] = &config.pins;
     let agents = matches!(overlay, Overlay::Sessions { agents: true });
-    let count = match overlay {
-        Overlay::Sessions { .. } => crate::agent::manager_entries(pins, sessions, agents).len(),
-        Overlay::Tabs => sessions[*active].tabs.len(),
-    };
+    let count = manager_count(overlay, sessions, *active, pins);
     Ok(match manager_apply(actions, selected, count.max(1)) {
         MgrOutcome::Stay => None,
         MgrOutcome::Close => Some(Mode::Running),
@@ -896,10 +921,11 @@ pub fn run_manager(
         }),
         MgrOutcome::ToggleAgents => match overlay {
             Overlay::Sessions { agents } => {
-                *selected = 0;
+                let overlay = Overlay::Sessions { agents: !agents };
+                *selected = manager_cursor(overlay, sessions, *active, pins);
                 Some(Mode::Manager {
-                    overlay: Overlay::Sessions { agents: !agents },
-                    selected: 0,
+                    overlay,
+                    selected: *selected,
                     search: None,
                 })
             }
@@ -960,8 +986,8 @@ pub fn run_manager(
                         *active = sessions.iter().position(|s| s.id == vid).unwrap_or(0);
                     }
                 }
-                let count = crate::agent::manager_entries(pins, sessions, agents).len();
-                *selected = (*selected).min(count.saturating_sub(1));
+                *selected = (*selected)
+                    .min(manager_count(overlay, sessions, *active, pins).saturating_sub(1));
                 None // stay in the manager
             }
             Overlay::Tabs => {
@@ -1425,10 +1451,8 @@ pub fn handle_input(
                     InputAction::Manager(overlay) => {
                         // Bytes typed right after the chord are already
                         // manager input.
-                        let mut selected = match overlay {
-                            Overlay::Sessions { .. } => *active,
-                            Overlay::Tabs => sessions[*active].active_tab,
-                        };
+                        let mut selected =
+                            manager_cursor(overlay, sessions, *active, &config.pins);
                         next_mode = Some(
                             run_manager(
                                 &manager_actions(buf, bindings),
@@ -1474,13 +1498,9 @@ pub fn handle_input(
                 match name.apply(buf, 40).0 {
                     NamingOutcome::Pending => {}
                     NamingOutcome::Cancel => {
-                        let selected = match overlay {
-                            Overlay::Sessions { .. } => *active,
-                            Overlay::Tabs => sessions[*active].active_tab,
-                        };
                         next_mode = Some(Mode::Manager {
                             overlay: *overlay,
-                            selected,
+                            selected: manager_cursor(*overlay, sessions, *active, &config.pins),
                             search: None,
                         });
                     }
@@ -1498,7 +1518,12 @@ pub fn handle_input(
                                 }
                                 next_mode = Some(Mode::Manager {
                                     overlay: *overlay,
-                                    selected: *active,
+                                    selected: manager_cursor(
+                                        *overlay,
+                                        sessions,
+                                        *active,
+                                        &config.pins,
+                                    ),
                                     search: None,
                                 });
                             }
@@ -1573,4 +1598,103 @@ pub fn handle_input(
         }
     }
     Ok((false, copied))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn session(name: &str, agent: bool, age_secs: u64) -> Session {
+        Session {
+            id: 0,
+            name: name.to_string(),
+            tabs: vec![],
+            active_tab: 0,
+            agent,
+            last_activity: Instant::now() - Duration::from_secs(age_secs),
+            last_size: (80, 24),
+        }
+    }
+
+    /// meow (pin) + work + agent build + notes: vec indices 0..=3, but
+    /// the normal list is meow/work/notes.
+    fn mixed() -> (Vec<Pin>, Vec<Session>) {
+        let pins = vec![Pin {
+            name: "meow".to_string(),
+        }];
+        let sessions = vec![
+            session("meow", false, 0),
+            session("work", false, 0),
+            session("build", true, 5),
+            session("notes", false, 0),
+        ];
+        (pins, sessions)
+    }
+
+    #[test]
+    fn normal_list_skips_agent_sessions() {
+        let (pins, sessions) = mixed();
+        let overlay = Overlay::Sessions { agents: false };
+        assert_eq!(manager_count(overlay, &sessions, 0, &pins), 3);
+        assert_eq!(manager_cursor(overlay, &sessions, 0, &pins), 0); // meow
+        assert_eq!(manager_cursor(overlay, &sessions, 1, &pins), 1); // work
+        assert_eq!(manager_cursor(overlay, &sessions, 2, &pins), 0); // agent: not in list
+        assert_eq!(manager_cursor(overlay, &sessions, 3, &pins), 2); // notes, not vec 3
+    }
+
+    #[test]
+    fn agent_list_skips_normal_sessions() {
+        let pins = vec![Pin {
+            name: "meow".to_string(),
+        }];
+        let sessions = vec![
+            session("meow", false, 0),
+            session("work", false, 0),
+            session("old", true, 30),
+            session("new", true, 1),
+        ];
+        let overlay = Overlay::Sessions { agents: true };
+        assert_eq!(manager_count(overlay, &sessions, 0, &pins), 2);
+        // Most recently active first: new (vec 3), then old (vec 2).
+        assert_eq!(manager_cursor(overlay, &sessions, 3, &pins), 0);
+        assert_eq!(manager_cursor(overlay, &sessions, 2, &pins), 1);
+        assert_eq!(manager_cursor(overlay, &sessions, 0, &pins), 0); // normal: not in list
+        assert_eq!(manager_cursor(overlay, &sessions, 1, &pins), 0);
+    }
+
+    #[test]
+    fn stopped_pin_shifts_the_normal_cursor() {
+        let pins = vec![
+            Pin {
+                name: "meow".to_string(),
+            },
+            Pin {
+                name: "work".to_string(),
+            },
+        ];
+        // meow is pinned but not running; work is vec 0, notes vec 1.
+        let sessions = vec![session("work", false, 0), session("notes", false, 0)];
+        let overlay = Overlay::Sessions { agents: false };
+        assert_eq!(manager_count(overlay, &sessions, 0, &pins), 3);
+        assert_eq!(manager_cursor(overlay, &sessions, 0, &pins), 1); // work, after stopped meow
+        assert_eq!(manager_cursor(overlay, &sessions, 1, &pins), 2); // notes
+    }
+
+    #[test]
+    fn up_from_a_vec_index_does_not_walk_phantom_rows() {
+        // Viewing notes (vec 3) used to seed selected=3 in a 3-row list.
+        let mut selected = 3;
+        let outcome = manager_apply(&[MgrAction::Up], &mut selected, 3);
+        assert!(matches!(outcome, MgrOutcome::Stay));
+        assert_eq!(selected, 1); // clamp to 2, then up — not 2 (one phantom press)
+    }
+
+    #[test]
+    fn down_from_a_vec_index_stays_on_the_last_row() {
+        let mut selected = 5;
+        let outcome = manager_apply(&[MgrAction::Down], &mut selected, 3);
+        assert!(matches!(outcome, MgrOutcome::Stay));
+        assert_eq!(selected, 2);
+    }
 }

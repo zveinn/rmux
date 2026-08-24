@@ -20,7 +20,7 @@ use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use crate::Result;
 use crate::agent;
 use crate::config::{self, Config};
-use crate::input::{Mode, Overlay, SelectState, handle_input, session_entries};
+use crate::input::{Mode, Overlay, SelectState, handle_input, manager_count, session_entries};
 use crate::model::Session;
 use crate::protocol::{
     C2S_ATTACH, C2S_INPUT, C2S_LIST, C2S_RESIZE, FrameReader, S2C_AGENT_ERR, S2C_AGENT_OK,
@@ -441,17 +441,21 @@ pub fn run() -> Result<()> {
                     }
                     None => client.bye("session closed"),
                 }
-                // Selections in a manager overlay may now be stale.
+            }
+            // A sibling session may have vanished; drop the cursor onto
+            // the overlay's own list, not the full sessions vec.
+            for client in &mut clients {
                 if let Mode::Manager {
                     overlay,
                     ref mut selected,
                     ..
                 } = client.mode
                 {
-                    let count = match overlay {
-                        Overlay::Sessions { .. } => sessions.len(),
-                        Overlay::Tabs => 1, // clamped properly on redraw input
-                    };
+                    let active = client
+                        .attached
+                        .and_then(|id| sessions.iter().position(|s| s.id == id))
+                        .unwrap_or(0);
+                    let count = manager_count(overlay, &sessions, active, &config.pins);
                     *selected = (*selected).min(count.saturating_sub(1));
                 }
             }
