@@ -54,6 +54,9 @@ struct ClientConn {
     /// Mouse select-to-copy state.
     select: SelectState,
     needs_redraw: bool,
+    /// OSC 52 payloads to send after the next redraw, so a synchronized
+    /// update is not stuck behind clipboard handling.
+    pending_copy: Vec<String>,
     /// A BYE was queued; drop the client once outbuf drains.
     closing: bool,
     /// The socket died; drop the client this iteration.
@@ -71,6 +74,7 @@ impl ClientConn {
             mode: Mode::Running,
             select: SelectState::default(),
             needs_redraw: false,
+            pending_copy: Vec::new(),
             closing: false,
             dead: false,
         }
@@ -624,6 +628,9 @@ pub fn run() -> Result<()> {
                 }
             }
             clients[ci].send(S2C_OUTPUT, &buf);
+            for text in std::mem::take(&mut clients[ci].pending_copy) {
+                clients[ci].send(S2C_OUTPUT, &osc52(&text));
+            }
         }
 
         // ---- Drop finished clients (sessions keep running). ----
@@ -722,10 +729,11 @@ fn handle_frame(
             clients[ci].select = select;
             clients[ci].needs_redraw = true;
 
-            // A completed mouse selection: put it on the client's
-            // clipboard via OSC 52 (in-band, so it works over SSH).
+            // Defer OSC 52 until after the redraw so the host terminal
+            // sees EndSynchronizedUpdate before a clipboard write that
+            // some terminals handle synchronously (and can stall on).
             if let Some(text) = copied {
-                clients[ci].send(S2C_OUTPUT, &osc52(&text));
+                clients[ci].pending_copy.push(text);
             }
 
             // Persist a freshly confirmed auto-run right away instead of

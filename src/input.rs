@@ -170,6 +170,7 @@ pub fn forward_input(pty: &Pty, bindings: &[Binding], buf: &[u8]) -> Option<(Inp
 /// A mouse/scroll intent extracted from raw client input. `raw` keeps
 /// the original SGR bytes so panes that track the mouse themselves get
 /// the event untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MouseEvent {
     /// Wheel notch; `cb` is the SGR button byte (modifiers included),
     /// `x`/`y` are 1-based screen coordinates.
@@ -198,14 +199,29 @@ impl MouseEvent {
     }
 }
 
-/// Split raw input into (bytes to process normally, mouse events).
+/// Split raw input into (bytes to process normally, mouse events,
+/// incomplete prefix to prepend to the next chunk).
+///
 /// SGR mouse sequences are always consumed here so they never leak
 /// into a shell as garbage bytes. PageUp/PageDown become events too.
-pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
+/// A sequence split across reads is returned as the remainder rather
+/// than dropped — dropping it used to feed the continuation (`0;24M`
+/// and so on) into the shell on the next chunk.
+pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>, Vec<u8>) {
     let mut clean = Vec::with_capacity(buf.len());
     let mut events = Vec::new();
     let mut i = 0;
     while i < buf.len() {
+        // Incomplete prefix of a sequence we parse: hold it for the
+        // next chunk instead of emitting ESC into the shell.
+        let rest = &buf[i..];
+        if rest == b"\x1b"
+            || rest == b"\x1b["
+            || rest == b"\x1b[5"
+            || rest == b"\x1b[6"
+        {
+            break;
+        }
         if buf[i..].starts_with(b"\x1b[<") {
             // SGR mouse: ESC [ < Cb ; Cx ; Cy (M|m)
             let mut j = i + 3;
@@ -247,8 +263,13 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
                 continue;
             }
             if j >= buf.len() {
-                // Sequence split across reads: drop the fragment rather
-                // than leaking it into the shell.
+                // Sequence split across reads. A real SGR mouse report
+                // is a few bytes; anything this long is not one, so
+                // dump it into the shell rather than buffering forever.
+                if buf.len() - i > 64 {
+                    clean.extend_from_slice(&buf[i..]);
+                    i = buf.len();
+                }
                 break;
             }
         }
@@ -262,7 +283,28 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>) {
         clean.push(buf[i]);
         i += 1;
     }
-    (clean, events)
+    let rest = if i < buf.len() {
+        buf[i..].to_vec()
+    } else {
+        Vec::new()
+    };
+    (clean, events, rest)
+}
+
+/// Consecutive drags only differ by pointer position; applying each one
+/// forces libghostty to treat the screen as fully dirty. Keep the latest.
+fn coalesce_mouse(events: Vec<MouseEvent>) -> Vec<MouseEvent> {
+    let mut out = Vec::with_capacity(events.len());
+    for event in events {
+        if matches!(event, MouseEvent::Drag { .. })
+            && matches!(out.last(), Some(MouseEvent::Drag { .. }))
+        {
+            *out.last_mut().unwrap() = event;
+        } else {
+            out.push(event);
+        }
+    }
+    out
 }
 
 /// Pane rectangles of a session's visible tab, in content coordinates
@@ -446,6 +488,7 @@ fn scroll_pane(pane: &mut crate::model::Pane, up: bool, page: bool) {
 }
 
 /// Per-client mouse-selection state (`select_copy`).
+#[derive(Default)]
 pub struct SelectState {
     /// The gesture and the pane it is anchored in.
     gesture: Option<(u64, libghostty_vt::selection::gesture::Gesture<'static>)>,
@@ -458,33 +501,42 @@ pub struct SelectState {
     /// Encoder for events forwarded to apps that track the mouse; it
     /// keeps motion-dedup state, so it is per-client and long-lived.
     encoder: Option<libghostty_vt::mouse::Encoder<'static>>,
+    /// Incomplete SGR/page prefix from the previous input chunk.
+    mouse_tail: Vec<u8>,
 }
 
-impl Default for SelectState {
-    fn default() -> Self {
-        Self {
-            gesture: None,
-            selected_pane: None,
-            anchor: None,
-            backward: false,
-            encoder: None,
+/// Look up a pane by id across every session.
+fn pane_by_id(sessions: &mut [Session], pid: u64) -> Option<&mut crate::model::Pane> {
+    for session in sessions.iter_mut() {
+        for tab in &mut session.tabs {
+            if tab.layout.pane(pid).is_some() {
+                return tab.layout.pane_mut(pid);
+            }
         }
+    }
+    None
+}
+
+/// Drop the gesture after resetting it against its pane, so libghostty
+/// can untrack the click pin. Dropping without reset leaks that pin
+/// until the terminal itself is dropped.
+fn drop_gesture(select: &mut SelectState, sessions: &mut [Session]) {
+    let Some((pid, mut gesture)) = select.gesture.take() else {
+        return;
+    };
+    if let Some(pane) = pane_by_id(sessions, pid) {
+        gesture.reset(&pane.term);
     }
 }
 
 /// Clear the visible selection (if any) and forget the gesture.
 fn clear_selection(select: &mut SelectState, sessions: &mut [Session]) {
-    select.gesture = None;
+    drop_gesture(select, sessions);
     let Some(pid) = select.selected_pane.take() else {
         return;
     };
-    for session in sessions.iter_mut() {
-        for tab in &mut session.tabs {
-            if let Some(pane) = tab.layout.pane(pid) {
-                let _ = pane.term.set_selection(None);
-                return;
-            }
-        }
+    if let Some(pane) = pane_by_id(sessions, pid) {
+        let _ = pane.term.set_selection(None);
     }
 }
 
@@ -572,6 +624,7 @@ fn apply_select(
             let backward = (ly, lx) < (ay, ax);
             if backward != select.backward {
                 select.backward = backward;
+                drop_gesture(select, sessions);
                 let rebuilt = (|| -> crate::Result<()> {
                     let session = &sessions[active];
                     let tab = &session.tabs[session.active_tab];
@@ -1199,7 +1252,18 @@ pub fn handle_input(
     let bindings: &[Binding] = &config.bindings;
 
     // Pull mouse and PageUp/PageDown events out of the stream first.
-    let (clean, mouse) = extract_mouse(buf);
+    // An incomplete SGR sequence at the end of the last chunk is
+    // prepended so a split report is not leaked into the shell.
+    let stitched = if select.mouse_tail.is_empty() {
+        None
+    } else {
+        let mut v = std::mem::take(&mut select.mouse_tail);
+        v.extend_from_slice(buf);
+        Some(v)
+    };
+    let (clean, mouse, rest) = extract_mouse(stitched.as_deref().unwrap_or(buf));
+    select.mouse_tail = rest;
+    let mouse = coalesce_mouse(mouse);
     let mut synthetic: Vec<u8> = Vec::new();
     let mut copied: Option<String> = None;
     match mode {
@@ -1696,5 +1760,148 @@ mod tests {
         let outcome = manager_apply(&[MgrAction::Down], &mut selected, 3);
         assert!(matches!(outcome, MgrOutcome::Stay));
         assert_eq!(selected, 2);
+    }
+
+    fn sgr(cb: u32, x: u16, y: u16, press: bool) -> Vec<u8> {
+        let end = if press { 'M' } else { 'm' };
+        format!("\x1b[<{cb};{x};{y}{end}").into_bytes()
+    }
+
+    #[test]
+    fn extract_mouse_press_drag_release() {
+        let mut buf = sgr(0, 10, 20, true);
+        buf.extend(sgr(32, 12, 20, true));
+        buf.extend(sgr(0, 12, 20, false));
+        let (clean, events, rest) = extract_mouse(&buf);
+        assert!(clean.is_empty());
+        assert!(rest.is_empty());
+        assert_eq!(
+            events,
+            vec![
+                MouseEvent::Press {
+                    left: true,
+                    cb: 0,
+                    x: 10,
+                    y: 20
+                },
+                MouseEvent::Drag {
+                    cb: 32,
+                    x: 12,
+                    y: 20
+                },
+                MouseEvent::Release {
+                    cb: 0,
+                    x: 12,
+                    y: 20
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_mouse_carries_a_split_sequence() {
+        let full = sgr(32, 40, 10, true);
+        let split = 6; // in the middle of the digits
+        assert!(split < full.len());
+        let (clean1, events1, rest1) = extract_mouse(&full[..split]);
+        assert!(clean1.is_empty());
+        assert!(events1.is_empty());
+        assert_eq!(rest1, full[..split]);
+
+        let mut next = rest1;
+        next.extend_from_slice(&full[split..]);
+        next.extend(sgr(32, 41, 10, true));
+        let (clean2, events2, rest2) = extract_mouse(&next);
+        assert!(clean2.is_empty());
+        assert!(rest2.is_empty());
+        assert_eq!(
+            events2,
+            vec![
+                MouseEvent::Drag {
+                    cb: 32,
+                    x: 40,
+                    y: 10
+                },
+                MouseEvent::Drag {
+                    cb: 32,
+                    x: 41,
+                    y: 10
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_mouse_does_not_leak_a_split_into_clean() {
+        // Previously the first chunk dropped `\x1b[<32;1` and the
+        // second chunk's `0;5M` went to the shell.
+        let (c, e, rest) = extract_mouse(b"\x1b[<32;1");
+        assert!(c.is_empty() && e.is_empty());
+        let mut next = rest;
+        next.extend_from_slice(b"0;5Mhello");
+        let (clean, events, rem) = extract_mouse(&next);
+        assert_eq!(clean, b"hello");
+        assert!(rem.is_empty());
+        assert_eq!(
+            events,
+            vec![MouseEvent::Drag {
+                cb: 32,
+                x: 10,
+                y: 5
+            }]
+        );
+    }
+
+    #[test]
+    fn coalesce_mouse_keeps_the_latest_drag() {
+        let events = vec![
+            MouseEvent::Press {
+                left: true,
+                cb: 0,
+                x: 1,
+                y: 1,
+            },
+            MouseEvent::Drag {
+                cb: 32,
+                x: 2,
+                y: 1,
+            },
+            MouseEvent::Drag {
+                cb: 32,
+                x: 3,
+                y: 1,
+            },
+            MouseEvent::Drag {
+                cb: 32,
+                x: 8,
+                y: 4,
+            },
+            MouseEvent::Release {
+                cb: 0,
+                x: 8,
+                y: 4,
+            },
+        ];
+        assert_eq!(
+            coalesce_mouse(events),
+            vec![
+                MouseEvent::Press {
+                    left: true,
+                    cb: 0,
+                    x: 1,
+                    y: 1,
+                },
+                MouseEvent::Drag {
+                    cb: 32,
+                    x: 8,
+                    y: 4,
+                },
+                MouseEvent::Release {
+                    cb: 0,
+                    x: 8,
+                    y: 4,
+                },
+            ]
+        );
     }
 }
