@@ -54,9 +54,11 @@ struct ClientConn {
     /// Mouse select-to-copy state.
     select: SelectState,
     needs_redraw: bool,
-    /// OSC 52 payloads to send after the next redraw, so a synchronized
-    /// update is not stuck behind clipboard handling.
-    pending_copy: Vec<String>,
+    /// Latest OSC 52 text to send after the next redraw (last write wins).
+    pending_copy: Option<String>,
+    /// Set when the last input was pointer-only, so the running-mode
+    /// paint can skip a synchronized update (faster to appear, some tearing).
+    skip_sync: bool,
     /// A BYE was queued; drop the client once outbuf drains.
     closing: bool,
     /// The socket died; drop the client this iteration.
@@ -74,7 +76,8 @@ impl ClientConn {
             mode: Mode::Running,
             select: SelectState::default(),
             needs_redraw: false,
-            pending_copy: Vec::new(),
+            pending_copy: None,
+            skip_sync: false,
             closing: false,
             dead: false,
         }
@@ -408,6 +411,7 @@ pub fn run() -> Result<()> {
                 && matches!(client.mode, Mode::Running)
             {
                 client.needs_redraw = true;
+                client.skip_sync = false;
             }
         }
 
@@ -478,6 +482,12 @@ pub fn run() -> Result<()> {
             if !clients[ci].needs_redraw || clients[ci].closing || clients[ci].dead {
                 continue;
             }
+            // Previous frame still in flight: keep needs_redraw and skip
+            // so we paint the latest state once the socket drains, instead
+            // of queuing a backlog of full-screen frames.
+            if !clients[ci].outbuf.is_empty() {
+                continue;
+            }
             clients[ci].needs_redraw = false;
             let Some(id) = clients[ci].attached else {
                 continue;
@@ -486,6 +496,7 @@ pub fn run() -> Result<()> {
                 continue;
             };
             let size = clients[ci].size;
+            let skip_sync = clients[ci].skip_sync;
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             match &clients[ci].mode {
                 Mode::Running => {
@@ -496,6 +507,7 @@ pub fn run() -> Result<()> {
                         size,
                         config.accent,
                         config.bar_top,
+                        !skip_sync,
                     )?;
                 }
                 Mode::Manager {
@@ -628,9 +640,10 @@ pub fn run() -> Result<()> {
                 }
             }
             clients[ci].send(S2C_OUTPUT, &buf);
-            for text in std::mem::take(&mut clients[ci].pending_copy) {
+            if let Some(text) = clients[ci].pending_copy.take() {
                 clients[ci].send(S2C_OUTPUT, &osc52(&text));
             }
+            clients[ci].skip_sync = false;
         }
 
         // ---- Drop finished clients (sessions keep running). ----
@@ -715,7 +728,7 @@ fn handle_frame(
             let mut select = std::mem::take(&mut clients[ci].select);
             let was_settings = matches!(mode, Mode::PaneSettings { .. });
             let overlay_involved = !matches!(mode, Mode::Running);
-            let (detach, copied) = handle_input(
+            let (detach, copied, mouse_only) = handle_input(
                 &payload,
                 &mut mode,
                 sessions,
@@ -728,12 +741,14 @@ fn handle_frame(
             clients[ci].mode = mode;
             clients[ci].select = select;
             clients[ci].needs_redraw = true;
+            clients[ci].skip_sync = mouse_only && matches!(clients[ci].mode, Mode::Running);
 
             // Defer OSC 52 until after the redraw so the host terminal
             // sees EndSynchronizedUpdate before a clipboard write that
             // some terminals handle synchronously (and can stall on).
+            // Last write wins: spam-select only needs the latest copy.
             if let Some(text) = copied {
-                clients[ci].pending_copy.push(text);
+                clients[ci].pending_copy = Some(text);
             }
 
             // Persist a freshly confirmed auto-run right away instead of
@@ -808,6 +823,7 @@ fn handle_frame(
                 sessions[si].resize(content_size((cols, rows)))?;
             }
             clients[ci].needs_redraw = true;
+            clients[ci].skip_sync = false;
         }
         _ => {
             eprintln!("dropping client after unknown frame kind {kind} (client newer than server?)");

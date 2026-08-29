@@ -307,6 +307,45 @@ fn coalesce_mouse(events: Vec<MouseEvent>) -> Vec<MouseEvent> {
     out
 }
 
+fn encode_mouse_event(event: &MouseEvent) -> Vec<u8> {
+    match *event {
+        MouseEvent::Wheel { cb, x, y, .. }
+        | MouseEvent::Press { cb, x, y, .. }
+        | MouseEvent::Drag { cb, x, y } => format!("\x1b[<{cb};{x};{y}M").into_bytes(),
+        MouseEvent::Release { cb, x, y } => format!("\x1b[<{cb};{x};{y}m").into_bytes(),
+        MouseEvent::Page { up } => {
+            if up {
+                b"\x1b[5~".to_vec()
+            } else {
+                b"\x1b[6~".to_vec()
+            }
+        }
+    }
+}
+
+/// Coalesce a stdin chunk into one payload: carry an incomplete SGR
+/// prefix in `tail`, keep only the latest drag, and re-encode. Used by
+/// the attach client when the host terminal is already behind, so a
+/// burst of motion becomes one C2S_INPUT instead of many.
+pub(crate) fn compact_mouse_input(buf: &[u8], tail: &mut Vec<u8>) -> Vec<u8> {
+    let stitched = if tail.is_empty() {
+        None
+    } else {
+        let mut v = std::mem::take(tail);
+        v.extend_from_slice(buf);
+        Some(v)
+    };
+    let (clean, events, rest) = extract_mouse(stitched.as_deref().unwrap_or(buf));
+    *tail = rest;
+    let events = coalesce_mouse(events);
+    let mut out = Vec::with_capacity(clean.len() + events.len() * 16);
+    for event in &events {
+        out.extend_from_slice(&encode_mouse_event(event));
+    }
+    out.extend_from_slice(&clean);
+    out
+}
+
 /// Pane rectangles of a session's visible tab, in content coordinates
 /// (the tab bar is already excluded by `size`).
 fn tab_rects(session: &Session, size: (u16, u16)) -> Vec<(u64, Rect)> {
@@ -1237,8 +1276,10 @@ impl TextInput {
 /// Handle one chunk of client input against the client's viewed session.
 ///
 /// `active` is the index of the viewed session and may change (manager
-/// switches); `mode` is the client's overlay state. Returns true when
-/// the client asked to detach.
+/// switches); `mode` is the client's overlay state. Returns
+/// `(detach, copied, mouse_only)`: `mouse_only` is set when the chunk
+/// contained pointer events and no keyboard bytes, so the renderer can
+/// skip a synchronized update.
 pub fn handle_input(
     buf: &[u8],
     mode: &mut Mode,
@@ -1247,7 +1288,7 @@ pub fn handle_input(
     size: (u16, u16),
     config: &Config,
     select: &mut SelectState,
-) -> Result<(bool, Option<String>)> {
+) -> Result<(bool, Option<String>, bool)> {
     use crate::model::SplitDir;
     let bindings: &[Binding] = &config.bindings;
 
@@ -1264,6 +1305,7 @@ pub fn handle_input(
     let (clean, mouse, rest) = extract_mouse(stitched.as_deref().unwrap_or(buf));
     select.mouse_tail = rest;
     let mouse = coalesce_mouse(mouse);
+    let mouse_only = clean.is_empty() && !mouse.is_empty();
     let mut synthetic: Vec<u8> = Vec::new();
     let mut copied: Option<String> = None;
     match mode {
@@ -1442,7 +1484,7 @@ pub fn handle_input(
                 };
                 buf = &buf[rest..];
                 match action {
-                    InputAction::Detach => return Ok((true, copied)),
+                    InputAction::Detach => return Ok((true, copied, mouse_only)),
                     InputAction::OpenSession(pi) => {
                         if let Some(pin) = config.pins.get(pi) {
                             *active = match sessions.iter().position(|s| s.name == pin.name) {
@@ -1661,7 +1703,7 @@ pub fn handle_input(
             break;
         }
     }
-    Ok((false, copied))
+    Ok((false, copied, mouse_only))
 }
 
 #[cfg(test)]
@@ -1842,6 +1884,38 @@ mod tests {
         let (clean, events, rem) = extract_mouse(&next);
         assert_eq!(clean, b"hello");
         assert!(rem.is_empty());
+        assert_eq!(
+            events,
+            vec![MouseEvent::Drag {
+                cb: 32,
+                x: 10,
+                y: 5
+            }]
+        );
+    }
+
+    #[test]
+    fn compact_mouse_input_coalesces_and_carries_a_tail() {
+        let mut tail = Vec::new();
+        let mut buf = sgr(0, 1, 1, true);
+        buf.extend(sgr(32, 2, 1, true));
+        buf.extend(sgr(32, 8, 4, true));
+        buf.extend(sgr(0, 8, 4, false));
+        let out = compact_mouse_input(&buf, &mut tail);
+        assert!(tail.is_empty());
+        let (clean, events, rest) = extract_mouse(&out);
+        assert!(clean.is_empty() && rest.is_empty());
+        assert_eq!(events.len(), 3);
+        assert!(matches!(events[0], MouseEvent::Press { x: 1, y: 1, .. }));
+        assert!(matches!(events[1], MouseEvent::Drag { x: 8, y: 4, .. }));
+        assert!(matches!(events[2], MouseEvent::Release { x: 8, y: 4, .. }));
+
+        let split = compact_mouse_input(b"\x1b[<32;1", &mut tail);
+        assert!(split.is_empty());
+        assert_eq!(tail, b"\x1b[<32;1");
+        let rest = compact_mouse_input(b"0;5M", &mut tail);
+        assert!(tail.is_empty());
+        let (_, events, _) = extract_mouse(&rest);
         assert_eq!(
             events,
             vec![MouseEvent::Drag {

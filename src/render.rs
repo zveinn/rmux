@@ -53,6 +53,7 @@ pub fn draw_session(
     size: (u16, u16),
     accent: Color,
     bar_top: bool,
+    synchronized: bool,
 ) -> Result<()> {
     let content = content_size(size);
     let full = Rect {
@@ -63,7 +64,11 @@ pub fn draw_session(
         h: content.1,
     };
     let tab = &session.tabs[session.active_tab];
-    queue!(out, BeginSynchronizedUpdate, Hide)?;
+    if synchronized {
+        queue!(out, BeginSynchronizedUpdate, Hide)?;
+    } else {
+        queue!(out, Hide)?;
+    }
 
     let mut cursor = None;
     let mut focus_rect = None;
@@ -91,7 +96,9 @@ pub fn draw_session(
     if let Some((x, y)) = cursor {
         queue!(out, MoveTo(x, y), Show)?;
     }
-    queue!(out, EndSynchronizedUpdate)?;
+    if synchronized {
+        queue!(out, EndSynchronizedUpdate)?;
+    }
     out.flush()?;
     Ok(())
 }
@@ -664,53 +671,76 @@ impl<'alloc> Renderer<'alloc> {
             SetBackgroundColor(pen.bg),
         )?;
 
-        let mut row_it = self.row_it.update(&snapshot)?;
-        let mut y: u16 = 0;
-        let mut text = String::with_capacity(16);
+        let frame_dirty = snapshot.dirty()?;
+        if frame_dirty != Dirty::Clean {
+            let mut row_it = self.row_it.update(&snapshot)?;
+            let mut y: u16 = 0;
+            let mut text = String::with_capacity(16);
 
-        while let Some(row) = row_it.next() {
-            queue!(out, MoveTo(rect.x, rect.y + y))?;
-            let mut cell_it = self.cell_it.update(row)?;
+            while let Some(row) = row_it.next() {
+                let paint = frame_dirty == Dirty::Full || row.dirty()?;
+                if !paint {
+                    y += 1;
+                    continue;
+                }
+                queue!(out, MoveTo(rect.x, rect.y + y))?;
+                let sel = row.selection()?;
+                let mut cell_it = self.cell_it.update(row)?;
+                let mut col: u16 = 0;
 
-            while let Some(cell) = cell_it.next() {
-                // A wide character already advanced the cursor two
-                // columns; printing anything for its spacer cell would
-                // clobber the glyph's right half.
-                match cell.raw_cell()?.wide()? {
-                    CellWide::SpacerTail | CellWide::SpacerHead => continue,
-                    CellWide::Narrow | CellWide::Wide => {}
+                while let Some(cell) = cell_it.next() {
+                    // A wide character already advanced the cursor two
+                    // columns; printing anything for its spacer cell would
+                    // clobber the glyph's right half.
+                    let wide = cell.raw_cell()?.wide()?;
+                    match wide {
+                        CellWide::SpacerTail | CellWide::SpacerHead => {
+                            col = col.saturating_add(1);
+                            continue;
+                        }
+                        CellWide::Narrow | CellWide::Wide => {}
+                    }
+
+                    let mut next = default;
+                    if cell.has_styling()? {
+                        let style = cell.style()?;
+                        next.fg = style_color(style.fg_color, default.fg);
+                        next.bg = style_color(style.bg_color, default.bg);
+                        next.bold = style.bold;
+                        next.italic = style.italic;
+                        next.underline = style.underline != Underline::None;
+                        // Pass inverse through as an attribute instead of
+                        // swapping colors ourselves: default fg/bg can't be
+                        // swapped in SGR, and the host does it correctly.
+                        next.reverse = style.inverse;
+                    }
+                    // Mouse selection highlight: one range query per row
+                    // instead of a C call per cell.
+                    if let Some(sel) = sel {
+                        let last = if wide == CellWide::Wide {
+                            col.saturating_add(1)
+                        } else {
+                            col
+                        };
+                        if col <= sel.end_x && last >= sel.start_x {
+                            next.reverse = !next.reverse;
+                        }
+                    }
+
+                    Self::apply_pen(out, &mut pen, next)?;
+
+                    if cell.graphemes_len()? == 0 {
+                        queue!(out, Print(' '))?;
+                    } else {
+                        cell.graphemes_utf8(&mut text)?;
+                        queue!(out, Print(&text))?;
+                    }
+                    col = col.saturating_add(1);
                 }
 
-                let mut next = default;
-                if cell.has_styling()? {
-                    let style = cell.style()?;
-                    next.fg = style_color(style.fg_color, default.fg);
-                    next.bg = style_color(style.bg_color, default.bg);
-                    next.bold = style.bold;
-                    next.italic = style.italic;
-                    next.underline = style.underline != Underline::None;
-                    // Pass inverse through as an attribute instead of
-                    // swapping colors ourselves: default fg/bg can't be
-                    // swapped in SGR, and the host does it correctly.
-                    next.reverse = style.inverse;
-                }
-                // Mouse selection highlight.
-                if cell.is_selected()? {
-                    next.reverse = !next.reverse;
-                }
-
-                Self::apply_pen(out, &mut pen, next)?;
-
-                if cell.graphemes_len()? == 0 {
-                    queue!(out, Print(' '))?;
-                } else {
-                    cell.graphemes_utf8(&mut text)?;
-                    queue!(out, Print(&text))?;
-                }
+                row.set_dirty(false)?;
+                y += 1;
             }
-
-            row.set_dirty(false)?;
-            y += 1;
         }
 
         // Report where the cursor should sit for this terminal.

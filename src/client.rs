@@ -24,7 +24,8 @@ use crate::protocol::{
 
 /// Cap on unwritten host-terminal output. Past this we stop reading the
 /// socket so the server's own buffer applies back-pressure; stdin is
-/// still drained so mouse tracking cannot deadlock the pty.
+/// still drained so mouse tracking cannot deadlock the pty. Latest-frame
+/// wins, so this is a safety net rather than a typical size.
 const MAX_STDOUT_BUF: usize = 4 * 1024 * 1024;
 
 /// Print the server's session listing and exit.
@@ -109,7 +110,9 @@ pub fn run(name: &str) -> Result<()> {
     let mut stdin_buf = [0u8; 65536];
     let mut sock_buf = [0u8; 65536];
     let mut sock_out = Vec::new();
-    let mut stdout_buf = Vec::new();
+    let mut host_out = HostOut::default();
+    let mut mouse_tail = Vec::new();
+    let mut held_stdin = Vec::new();
     let mut reader = FrameReader::new();
     let mut reason = String::from("connection closed by server");
 
@@ -119,7 +122,7 @@ pub fn run(name: &str) -> Result<()> {
             // socket would stay readable and we'd spin. Empty events
             // still report HUP/ERR.
             let mut sock_interest = PollFlags::empty();
-            if stdout_buf.len() < MAX_STDOUT_BUF {
+            if host_out.pending() < MAX_STDOUT_BUF {
                 sock_interest |= PollFlags::POLLIN;
             }
             if !sock_out.is_empty() {
@@ -129,7 +132,7 @@ pub fn run(name: &str) -> Result<()> {
                 PollFd::new(stdin.as_fd(), PollFlags::POLLIN),
                 PollFd::new(stream.as_fd(), sock_interest),
             ];
-            if !stdout_buf.is_empty() {
+            if !host_out.is_empty() {
                 fds.push(PollFd::new(stdout.as_fd(), PollFlags::POLLOUT));
             }
             poll(&mut fds, PollTimeout::from(100u16))?;
@@ -147,15 +150,30 @@ pub fn run(name: &str) -> Result<()> {
                         reason = "detached (stdin closed)".to_string();
                         break 'outer;
                     }
-                    Ok(len) => sock_out.extend_from_slice(&frame(C2S_INPUT, &stdin_buf[..len])),
+                    Ok(len) => {
+                        if host_out.is_empty() {
+                            sock_out.extend_from_slice(&frame(C2S_INPUT, &stdin_buf[..len]));
+                        } else {
+                            // Host is behind: hold and coalesce into one
+                            // input frame after the read loop.
+                            held_stdin.extend_from_slice(&stdin_buf[..len]);
+                        }
+                    }
                     Err(Errno::EINTR) => continue,
                     Err(Errno::EAGAIN) => break,
                     Err(e) => return Err(e.into()),
                 }
             }
         }
+        if !held_stdin.is_empty() {
+            let compacted = crate::input::compact_mouse_input(&held_stdin, &mut mouse_tail);
+            held_stdin.clear();
+            if !compacted.is_empty() {
+                sock_out.extend_from_slice(&frame(C2S_INPUT, &compacted));
+            }
+        }
 
-        if sock_readable && stdout_buf.len() < MAX_STDOUT_BUF {
+        if sock_readable && host_out.pending() < MAX_STDOUT_BUF {
             loop {
                 match stream.read(&mut sock_buf) {
                     Ok(0) => break 'outer,
@@ -167,7 +185,7 @@ pub fn run(name: &str) -> Result<()> {
             }
             while let Some((kind, payload)) = reader.next_frame().map_err(io::Error::other)? {
                 match kind {
-                    S2C_OUTPUT => stdout_buf.extend_from_slice(&payload),
+                    S2C_OUTPUT => host_out.push(&payload),
                     S2C_BYE => {
                         reason = String::from_utf8_lossy(&payload).into_owned();
                         break 'outer;
@@ -196,7 +214,7 @@ pub fn run(name: &str) -> Result<()> {
         if !flush_stream(&mut stream, &mut sock_out)? {
             break;
         }
-        match flush_fd(stdout.as_fd(), &mut stdout_buf) {
+        match flush_host(stdout.as_fd(), &mut host_out) {
             Ok(true) => {}
             Ok(false) => {
                 reason = "detached (stdout closed)".to_string();
@@ -208,7 +226,8 @@ pub fn run(name: &str) -> Result<()> {
 
     drop(stdin_nb);
     drop(stdout_nb);
-    let _ = stdout.write_all(&stdout_buf);
+    let leftover = host_out.into_bytes();
+    let _ = stdout.write_all(&leftover);
     let _ = stdout.flush();
     drop(guard);
     println!("[rmux] {reason}");
@@ -256,19 +275,103 @@ fn flush_stream(stream: &mut impl Write, buf: &mut Vec<u8>) -> io::Result<bool> 
     Ok(true)
 }
 
-fn flush_fd(fd: BorrowedFd<'_>, buf: &mut Vec<u8>) -> io::Result<bool> {
-    while !buf.is_empty() {
-        match unistd::write(fd, buf) {
-            Ok(0) => return Ok(false),
-            Ok(n) => {
-                buf.drain(..n);
-            }
-            Err(Errno::EINTR) => continue,
-            Err(Errno::EAGAIN) => return Ok(true),
-            Err(e) => return Err(e.into()),
+/// Host-terminal output: at most one in-flight payload (must be finished
+/// so a 2026h is never stranded), one replaceable render frame, and one
+/// replaceable OSC 52. Spam-select then only paints/copies the latest.
+#[derive(Default)]
+struct HostOut {
+    writing: Vec<u8>,
+    off: usize,
+    frame: Option<Vec<u8>>,
+    clipboard: Option<Vec<u8>>,
+}
+
+impl HostOut {
+    fn is_empty(&self) -> bool {
+        self.off >= self.writing.len() && self.frame.is_none() && self.clipboard.is_none()
+    }
+
+    fn pending(&self) -> usize {
+        self.writing.len().saturating_sub(self.off)
+            + self.frame.as_ref().map_or(0, Vec::len)
+            + self.clipboard.as_ref().map_or(0, Vec::len)
+    }
+
+    fn push(&mut self, payload: &[u8]) {
+        if payload.starts_with(b"\x1b]52;") {
+            self.clipboard = Some(payload.to_vec());
+        } else {
+            self.frame = Some(payload.to_vec());
         }
     }
-    Ok(true)
+
+    fn writing_slice(&self) -> Option<&[u8]> {
+        let rest = &self.writing[self.off..];
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest)
+        }
+    }
+
+    fn advance(&mut self, n: usize) {
+        self.off += n;
+        if self.off >= self.writing.len() {
+            self.writing.clear();
+            self.off = 0;
+        }
+    }
+
+    fn promote(&mut self) -> bool {
+        if self.off < self.writing.len() {
+            return true;
+        }
+        self.writing.clear();
+        self.off = 0;
+        if let Some(frame) = self.frame.take() {
+            self.writing = frame;
+            return true;
+        }
+        if let Some(clip) = self.clipboard.take() {
+            self.writing = clip;
+            return true;
+        }
+        false
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        let mut out = self.writing.split_off(self.off.min(self.writing.len()));
+        if let Some(frame) = self.frame.take() {
+            out.extend_from_slice(&frame);
+        }
+        if let Some(clip) = self.clipboard.take() {
+            out.extend_from_slice(&clip);
+        }
+        out
+    }
+}
+
+fn flush_host(fd: BorrowedFd<'_>, out: &mut HostOut) -> io::Result<bool> {
+    loop {
+        if out.writing_slice().is_none() {
+            if !out.promote() {
+                return Ok(true);
+            }
+        }
+        let n = {
+            let Some(chunk) = out.writing_slice() else {
+                return Ok(true);
+            };
+            match unistd::write(fd, chunk) {
+                Ok(0) => return Ok(false),
+                Ok(n) => n,
+                Err(Errno::EINTR) => continue,
+                Err(Errno::EAGAIN) => return Ok(true),
+                Err(e) => return Err(e.into()),
+            }
+        };
+        out.advance(n);
+    }
 }
 
 /// Puts the terminal into raw mode + alternate screen, and restores it
