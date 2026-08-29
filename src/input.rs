@@ -207,15 +207,26 @@ impl MouseEvent {
 /// A sequence split across reads is returned as the remainder rather
 /// than dropped — dropping it used to feed the continuation (`0;24M`
 /// and so on) into the shell on the next chunk.
+///
+/// A trailing lone ESC is the one prefix we do *not* hold blindly: it
+/// is far more often the user pressing Esc than half a mouse report,
+/// and holding it stitches it onto whatever they type next — turning
+/// Esc then `h` into the `alt+h` chord, so Esc silently acted like a
+/// command prefix. It is only held directly after a sequence we just
+/// parsed, which is what a report split mid-burst actually looks like.
 pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>, Vec<u8>) {
     let mut clean = Vec::with_capacity(buf.len());
     let mut events = Vec::new();
     let mut i = 0;
+    // Whether the bytes just before `i` were a sequence we consumed.
+    let mut after_seq = false;
     while i < buf.len() {
         // Incomplete prefix of a sequence we parse: hold it for the
-        // next chunk instead of emitting ESC into the shell.
+        // next chunk instead of emitting ESC into the shell. The longer
+        // prefixes are unambiguous — `\x1b[` and friends can only ever
+        // complete into a key or a report, never into an alt+ chord.
         let rest = &buf[i..];
-        if rest == b"\x1b"
+        if (rest == b"\x1b" && after_seq)
             || rest == b"\x1b["
             || rest == b"\x1b[5"
             || rest == b"\x1b[6"
@@ -260,6 +271,7 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>, Vec<u8>) {
                     });
                 }
                 i = j + 1;
+                after_seq = true;
                 continue;
             }
             if j >= buf.len() {
@@ -278,10 +290,12 @@ pub fn extract_mouse(buf: &[u8]) -> (Vec<u8>, Vec<MouseEvent>, Vec<u8>) {
                 up: buf[i + 2] == b'5',
             });
             i += 4;
+            after_seq = true;
             continue;
         }
         clean.push(buf[i]);
         i += 1;
+        after_seq = false;
     }
     let rest = if i < buf.len() {
         buf[i..].to_vec()
@@ -1884,6 +1898,54 @@ mod tests {
         let (clean, events, rem) = extract_mouse(&next);
         assert_eq!(clean, b"hello");
         assert!(rem.is_empty());
+        assert_eq!(
+            events,
+            vec![MouseEvent::Drag {
+                cb: 32,
+                x: 10,
+                y: 5
+            }]
+        );
+    }
+
+    #[test]
+    fn a_lone_esc_is_delivered_instead_of_held() {
+        // Holding it made the next keystroke complete an alt+ chord:
+        // Esc then `h` arrived as `\x1bh` and moved the pane focus.
+        let (clean, events, rest) = extract_mouse(b"\x1b");
+        assert_eq!(clean, b"\x1b");
+        assert!(events.is_empty() && rest.is_empty());
+
+        // So the following keystroke stays a plain `h`.
+        let (clean, _, rest) = extract_mouse(b"h");
+        assert_eq!(clean, b"h");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn an_esc_typed_after_other_keys_is_not_held_either() {
+        // `x` then Esc landing in one read is still a human pressing
+        // Esc, not a split report.
+        let (clean, events, rest) = extract_mouse(b"x\x1b");
+        assert_eq!(clean, b"x\x1b");
+        assert!(events.is_empty() && rest.is_empty());
+    }
+
+    #[test]
+    fn an_esc_right_after_a_report_is_still_held() {
+        // Mid-burst split: the ESC begins the next report, so holding
+        // it keeps `0;5M` out of the shell.
+        let mut buf = sgr(0, 1, 1, true);
+        buf.extend_from_slice(b"\x1b");
+        let (clean, events, rest) = extract_mouse(&buf);
+        assert!(clean.is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(rest, b"\x1b");
+
+        let mut next = rest;
+        next.extend_from_slice(b"[<32;10;5M");
+        let (clean, events, rest) = extract_mouse(&next);
+        assert!(clean.is_empty() && rest.is_empty());
         assert_eq!(
             events,
             vec![MouseEvent::Drag {
